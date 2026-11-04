@@ -1,0 +1,19 @@
+# 调度台运行态，不进 git
+locks.md
+dispatch.md
+
+# 引擎生成物
+.godot/
+Library/
+Temp/
+obj/
+Logs/
+*.csproj
+*.sln
+
+# 导出物
+export/
+build/
+
+# macOS
+.DS_Store

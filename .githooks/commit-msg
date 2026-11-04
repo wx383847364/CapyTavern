@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+source "${REPO_ROOT}/.githooks/_common"
+
+run_python_script "${REPO_ROOT}" \
+  "${REPO_ROOT}/tools/doc_maintenance/check_commit_message.py" \
+  --message-file "$1"

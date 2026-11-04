@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+resolve_python_command() {
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+    PYTHON_CMD=(python3)
+    return 0
+  fi
+
+  if command -v python >/dev/null 2>&1 && python -c 'import sys; raise SystemExit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+    PYTHON_CMD=(python)
+    return 0
+  fi
+
+  if command -v py >/dev/null 2>&1 && py -3 -c 'import sys; raise SystemExit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+    PYTHON_CMD=(py -3)
+    return 0
+  fi
+
+  return 1
+}
+
+run_python_script() {
+  local repo_root="$1"
+  shift
+
+  if ! resolve_python_command; then
+    echo "[hook-check] 未找到 Python 3.8+。Git hooks 需要 Python 校验提交规范。" >&2
+    echo "[hook-check] Windows 安装 Python 后确保 python 或 py 在 PATH 中；macOS/Linux 安装 python3。" >&2
+    echo "[hook-check] 修好后执行：bash tools/repo_maintenance/install_git_hooks.sh" >&2
+    exit 127
+  fi
+
+  "${PYTHON_CMD[@]}" "$@"
+}

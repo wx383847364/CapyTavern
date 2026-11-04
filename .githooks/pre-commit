@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# 拦截运行态台账、引擎生成物和导出物被误加入暂存区。
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BLOCKED=0
+
+while IFS= read -r path; do
+  case "${path}" in
+    locks.md|dispatch.md)
+      echo "[pre-commit] 不允许提交运行态台账：${path}" >&2
+      BLOCKED=1
+      ;;
+    .godot/*|Library/*|Temp/*|obj/*|Logs/*|export/*|build/*|*.csproj|*.sln|.DS_Store|*/.DS_Store)
+      echo "[pre-commit] 不允许提交生成物或导出物：${path}" >&2
+      BLOCKED=1
+      ;;
+  esac
+done < <(git -C "${REPO_ROOT}" diff --cached --name-only --diff-filter=ACMR)
+
+if [[ "${BLOCKED}" -ne 0 ]]; then
+  echo "[pre-commit] 请先从暂存区移除上述文件，再提交。" >&2
+  exit 1
+fi
