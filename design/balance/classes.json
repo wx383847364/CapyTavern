@@ -1,0 +1,116 @@
+{
+  "_status": "正式 v0.1（2026-11-06，策划交付，待测试复核；计算口径见 README.md）",
+  "_table": "表1 职业",
+  "warrior": {
+    "name": "战士",
+    "color": "c8553d",
+    "max_hp": 600,
+    "speed": 190,
+    "threat_coef": 3.0,
+    "armor": 60,
+    "magic_resist": 20,
+    "attack": {
+      "kind": "damage",
+      "range": 70,
+      "damage": 20,
+      "interval": 1.2
+    },
+    "resource": {
+      "kind": "rage",
+      "max": 100,
+      "start": 40,
+      "regen": 0,
+      "on_attack": 8
+    },
+    "skills": {
+      "q": "slam",
+      "w": "defensive_taunt",
+      "e": "whirlwind",
+      "r": "bloodrage"
+    }
+  },
+  "rogue": {
+    "name": "盗贼",
+    "color": "e0b341",
+    "max_hp": 380,
+    "speed": 230,
+    "threat_coef": 1.0,
+    "armor": 20,
+    "magic_resist": 20,
+    "attack": {
+      "kind": "damage",
+      "range": 60,
+      "damage": 12,
+      "interval": 0.7
+    },
+    "resource": {
+      "kind": "energy",
+      "max": 100,
+      "start": 100,
+      "regen": 12,
+      "on_attack": 0
+    },
+    "skills": {
+      "q": "kick_stab",
+      "w": "lethal_strike",
+      "e": "feint",
+      "r": "adrenaline"
+    }
+  },
+  "mage": {
+    "name": "法师",
+    "color": "4f8fe0",
+    "max_hp": 300,
+    "speed": 180,
+    "threat_coef": 1.0,
+    "armor": 5,
+    "magic_resist": 40,
+    "attack": {
+      "kind": "damage",
+      "range": 420,
+      "damage": 15,
+      "interval": 1.4
+    },
+    "resource": {
+      "kind": "mana",
+      "max": 100,
+      "start": 100,
+      "regen": 3,
+      "on_attack": 0
+    },
+    "skills": {
+      "q": "fire_burst",
+      "w": "arcane_bolt",
+      "e": "mana_armor",
+      "r": "evocation"
+    }
+  },
+  "priest": {
+    "name": "牧师",
+    "color": "e8e8e8",
+    "max_hp": 340,
+    "speed": 180,
+    "threat_coef": 1.0,
+    "armor": 10,
+    "magic_resist": 40,
+    "attack": {
+      "kind": "heal",
+      "range": 400,
+      "damage": 16,
+      "interval": 1.6
+    },
+    "resource": {
+      "kind": "mana",
+      "max": 100,
+      "start": 100,
+      "regen": 3,
+      "on_attack": 0
+    },
+    "skills": {
+      "q": "greater_heal",
+      "w": "prayer",
+      "e": "ward",
+      "r": "meditate"
+    }
+  }
+}

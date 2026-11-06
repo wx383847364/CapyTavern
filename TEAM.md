@@ -2,7 +2,7 @@
 
 > 位置：`/Users/bruce/work/CapyTavern/TEAM.md`。只在冲突或需要细节时查，**不要求开工通读**。
 > 版本：2026-11-04 制作人确认。
-> 项目状态：空仓起步。git 单仓；客户端 Godot 或 Unity（未定）；2D 美术，角色用 Spine；暂无服务端，先本地 Mock。
+> 项目状态：P0 工程已交。git 单仓；客户端 Godot 4.7.2.stable；2D 美术，角色用 Spine；暂无服务端，先本地 Mock。
 
 ## 1. 编制（7 个 bot 一一对应）
 
@@ -29,9 +29,10 @@
 | `server/**`、`protocol/**` | 酒馆服务器 |
 | `doc/**`（任务单、进度、契约、裁决） | 酒馆制作人 |
 | `tools/doc_maintenance/**`、`tools/repo_maintenance/**`、`.githooks/**` | 酒馆制作人 |
+| `tools/project_dashboard/**`（本机进度控制台代码；登记表在 `doc/方案与数据/控制台登记.json`，归制作人） | 酒馆程序 |
 | `locks.md`、`dispatch.md` | 酒馆大肥鱼 |
 
-`tools/**` 不整树交给某一岗。当前只有文档维护和仓库 hook，归制作人。以后客户端构建或资源管线另开 `tools/client/**`，归酒馆程序，先改本表再使用。
+`tools/**` 不整树交给某一岗。文档维护、仓库 hook 归制作人；进度控制台代码 2026-11-06 起归程序，它读的登记表仍归制作人。以后客户端构建或资源管线另开 `tools/client/**`，归酒馆程序，先改本表再使用。
 `export/**` 的写者是酒馆表现；产物留在本地，由 `.gitignore` 排除，不进提交。
 禁碰：生成物、构建配置、`.godot/`、`Library/`、`obj/`、`*.import` 自动生成段。
 `locks.md`、`dispatch.md` 是运行态，不进 git，须写进 `.gitignore`。
@@ -81,4 +82,4 @@
 
 ## 9. 常驻指令
 
-见同目录 `instructions.md`，或群里的指令卡片。公共底线条每个 bot 都要贴，再各加一句本岗。
+正文在 `doc/长期主文档/协作与执行/团队常驻指令.md`。群里的指令卡片与这份正文用同一句。公共底线条每个 bot 都要贴，再各加一句本岗。卡片上的当前状态以 `dispatch.md` 为准。

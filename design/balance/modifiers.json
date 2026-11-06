@@ -1,0 +1,177 @@
+{
+  "_status": "正式 v0.1（2026-11-06，策划交付，待测试复核；计算口径见 README.md）",
+  "_table": "表5 天赋与两件套修正。group=talent 时同一职业内的互斥选项由 id 中的 t1/t2 区分，不另设字段；op 取 add_pct（同类加算）或 add_flat（绝对值，仅用于持续时间秒数）；只改现有技能数值或持续时间，不增删技能槽、不改目标类型",
+  "rows": [
+    {
+      "id": "war_t1_dur",
+      "class_id": "warrior",
+      "group": "talent",
+      "skill_id": "defensive_taunt",
+      "param": "duration",
+      "op": "add_flat",
+      "value": 2
+    },
+    {
+      "id": "war_t1_cost",
+      "class_id": "warrior",
+      "group": "talent",
+      "skill_id": "defensive_taunt",
+      "param": "cost",
+      "op": "add_pct",
+      "value": 0.2
+    },
+    {
+      "id": "war_t2_cost",
+      "class_id": "warrior",
+      "group": "talent",
+      "skill_id": "defensive_taunt",
+      "param": "cost",
+      "op": "add_pct",
+      "value": -0.25
+    },
+    {
+      "id": "rog_t1_dmg",
+      "class_id": "rogue",
+      "group": "talent",
+      "skill_id": "kick_stab",
+      "param": "damage",
+      "op": "add_pct",
+      "value": 0.25
+    },
+    {
+      "id": "rog_t1_cost",
+      "class_id": "rogue",
+      "group": "talent",
+      "skill_id": "kick_stab",
+      "param": "cost",
+      "op": "add_pct",
+      "value": 0.2
+    },
+    {
+      "id": "rog_t2_cd",
+      "class_id": "rogue",
+      "group": "talent",
+      "skill_id": "kick_stab",
+      "param": "cooldown",
+      "op": "add_pct",
+      "value": -0.25
+    },
+    {
+      "id": "rog_t2_dmg",
+      "class_id": "rogue",
+      "group": "talent",
+      "skill_id": "kick_stab",
+      "param": "damage",
+      "op": "add_pct",
+      "value": -0.2
+    },
+    {
+      "id": "mag_t1_dmg",
+      "class_id": "mage",
+      "group": "talent",
+      "skill_id": "fire_burst",
+      "param": "damage",
+      "op": "add_pct",
+      "value": 0.25
+    },
+    {
+      "id": "mag_t1_rad",
+      "class_id": "mage",
+      "group": "talent",
+      "skill_id": "fire_burst",
+      "param": "radius",
+      "op": "add_pct",
+      "value": -0.4
+    },
+    {
+      "id": "mag_t2_rad",
+      "class_id": "mage",
+      "group": "talent",
+      "skill_id": "fire_burst",
+      "param": "radius",
+      "op": "add_pct",
+      "value": 0.4
+    },
+    {
+      "id": "mag_t2_dmg",
+      "class_id": "mage",
+      "group": "talent",
+      "skill_id": "fire_burst",
+      "param": "damage",
+      "op": "add_pct",
+      "value": -0.15
+    },
+    {
+      "id": "pri_t1_cost",
+      "class_id": "priest",
+      "group": "talent",
+      "skill_id": "greater_heal",
+      "param": "cost",
+      "op": "add_pct",
+      "value": -0.25
+    },
+    {
+      "id": "pri_t1_heal",
+      "class_id": "priest",
+      "group": "talent",
+      "skill_id": "greater_heal",
+      "param": "heal",
+      "op": "add_pct",
+      "value": -0.1
+    },
+    {
+      "id": "pri_t2_heal",
+      "class_id": "priest",
+      "group": "talent",
+      "skill_id": "greater_heal",
+      "param": "heal",
+      "op": "add_pct",
+      "value": 0.25
+    },
+    {
+      "id": "pri_t2_cd",
+      "class_id": "priest",
+      "group": "talent",
+      "skill_id": "greater_heal",
+      "param": "cooldown",
+      "op": "add_pct",
+      "value": 0.25
+    },
+    {
+      "id": "war_set2_dur",
+      "class_id": "warrior",
+      "group": "set",
+      "skill_id": "defensive_taunt",
+      "param": "duration",
+      "op": "add_flat",
+      "value": 1
+    },
+    {
+      "id": "rog_set2_dmg",
+      "class_id": "rogue",
+      "group": "set",
+      "skill_id": "kick_stab",
+      "param": "damage",
+      "op": "add_pct",
+      "value": 0.05
+    },
+    {
+      "id": "mag_set2_dmg",
+      "class_id": "mage",
+      "group": "set",
+      "skill_id": "fire_burst",
+      "param": "damage",
+      "op": "add_pct",
+      "value": 0.05
+    },
+    {
+      "id": "pri_set2_heal",
+      "class_id": "priest",
+      "group": "set",
+      "skill_id": "greater_heal",
+      "param": "heal",
+      "op": "add_pct",
+      "value": 0.05
+    }
+  ]
+}

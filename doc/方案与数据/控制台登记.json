@@ -1,0 +1,81 @@
+{
+  "version": "0.1",
+  "updated": "2026-11-06",
+  "owner": "酒馆制作人",
+  "milestones": [
+    {
+      "id": "P0", "name": "工程能导出", "owner": "酒馆程序", "dependsOn": [],
+      "dispatchKey": "P0 工程能导出",
+      "items": [
+        { "id": "P0-1", "name": "Godot 4.7.2 工程能开窗口", "evidence": ["client/project.godot", "client/scenes/main.tscn"] },
+        { "id": "P0-2", "name": "输入表 12 个动作", "evidence": ["client/project.godot"] },
+        { "id": "P0-3", "name": "不依赖编辑器的运行包", "evidence": ["build/p0/CapyTavern.zip"] },
+        { "id": "P0-4", "name": "窗口 12 个动作回显", "owner": "酒馆测试", "evidence": [] }
+      ]
+    },
+    {
+      "id": "P1", "name": "战斗灰盒", "owner": "酒馆程序", "dependsOn": ["P0"],
+      "dispatchKey": "P1 战斗灰盒",
+      "items": [
+        { "id": "P1-1", "name": "1～4 人出场，空槽不生成", "evidence": [] },
+        { "id": "P1-2", "name": "选人、点地移动、右键攻击 / 治疗", "evidence": [] },
+        { "id": "P1-3", "name": "Q/W/E/R 四技能与冷却", "evidence": [] },
+        { "id": "P1-4", "name": "4 个敌人、胜负与 120 秒失败", "evidence": [] },
+        { "id": "P1-5", "name": "1 人、4 人各打完一场", "owner": "酒馆测试", "evidence": [] }
+      ]
+    },
+    {
+      "id": "P2", "name": "配置和单档", "owner": "酒馆程序", "dependsOn": ["P1"],
+      "items": [
+        { "id": "P2-1", "name": "四职业、八槽、天赋读配置", "dispatchKey": "P2a 数据同步与防护", "evidence": [] },
+        { "id": "P2-2", "name": "招募写 ownedItems + equips", "dispatchKey": "P2b 单档招募领奖", "evidence": [] },
+        { "id": "P2-3", "name": "胜利领奖与 claimedRuns", "dispatchKey": "P2b 单档招募领奖", "evidence": [] },
+        { "id": "P2-4", "name": "重启保留存档", "owner": "酒馆测试", "dispatchKey": "P2b 单档招募领奖", "evidence": [] }
+      ]
+    },
+    {
+      "id": "P3", "name": "酒馆场景", "owner": "酒馆程序", "dependsOn": ["P2"],
+      "items": [
+        { "id": "P3-1", "name": "只生成队长、点地寻路", "dispatchKey": "P3a 酒馆场景与交互", "evidence": [] },
+        { "id": "P3-2", "name": "走近交互点开面板", "dispatchKey": "P3a 酒馆场景与交互", "evidence": [] },
+        { "id": "P3-3", "name": "招募 / 整备 / 出征入口", "dispatchKey": "P3b 面板与出征入口", "evidence": [] },
+        { "id": "P3-4", "name": "操作稿 §1.12 四条示例", "dispatchKey": "P3b 面板与出征入口", "owner": "酒馆测试", "evidence": [] }
+      ]
+    },
+    {
+      "id": "P4", "name": "出征衔接", "owner": "酒馆程序", "dependsOn": ["P3"],
+      "dispatchKey": "P4 出征衔接",
+      "items": [
+        { "id": "P4-1", "name": "锁定名单后加载战斗", "evidence": [] },
+        { "id": "P4-2", "name": "回酒馆仍是队长", "evidence": [] },
+        { "id": "P4-3", "name": "待领奖时不能出征", "evidence": [] },
+        { "id": "P4-4", "name": "1～4 人各出征一次", "owner": "酒馆测试", "evidence": [] }
+      ]
+    },
+    {
+      "id": "P5", "name": "Spine", "owner": "酒馆表现", "dependsOn": ["P1"], "parallel": true,
+      "items": [
+        { "id": "P5-1", "name": "队长六状态资源", "evidence": [] },
+        { "id": "P5-2", "name": "程序按状态名驱动", "owner": "酒馆程序", "evidence": [] }
+      ]
+    }
+  ],
+  "flow": [
+    { "id": "new-save", "name": "新档", "item": "P2-4", "next": ["tavern"] },
+    { "id": "tavern", "name": "酒馆", "item": "P3-1", "next": ["recruit", "outfit", "depart"] },
+    { "id": "recruit", "name": "招募", "item": "P2-2", "next": ["tavern"] },
+    { "id": "outfit", "name": "整备", "item": "P2-1", "next": ["tavern"] },
+    { "id": "depart", "name": "出征", "item": "P4-1", "next": ["loading"] },
+    { "id": "loading", "name": "加载", "item": "P4-1", "next": ["battle"] },
+    { "id": "battle", "name": "战斗", "item": "P1-4", "next": ["reward", "fail"] },
+    { "id": "reward", "name": "胜利领奖", "item": "P2-3", "next": ["back"] },
+    { "id": "fail", "name": "失败", "item": "P1-4", "next": ["back"] },
+    { "id": "back", "name": "回酒馆", "item": "P4-2", "next": ["tavern"] }
+  ],
+  "layers": [
+    { "id": "presentation", "name": "表现", "paths": ["client/assets/", "client/scenes/ui/"] },
+    { "id": "input", "name": "输入", "paths": ["client/scripts/input/"] },
+    { "id": "gameplay", "name": "玩法", "paths": ["client/scenes/battle/", "client/scenes/tavern/", "client/scripts/battle/", "client/scripts/tavern/"] },
+    { "id": "data", "name": "数据与存档", "paths": ["client/data/", "client/scripts/save/"] }
+  ]
+}

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#07111f" />
+    <title>卡皮酒馆 项目控制台</title>
+    <style>
+      #file-protocol-help {
+        box-sizing: border-box;
+        width: min(680px, calc(100% - 32px));
+        margin: 12vh auto 0;
+        padding: 28px;
+        border: 1px solid #27415e;
+        border-radius: 16px;
+        color: #dcecff;
+        background: #0b1828;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.65;
+      }
+      #file-protocol-help code { display: block; margin: 16px 0; padding: 12px 14px; border-radius: 8px; color: #9fd6ff; background: #07111f; }
+    </style>
+  </head>
+  <body>
+    <section id="file-protocol-help" hidden>
+      <h1>控制台需要本机服务</h1>
+      <p>不能通过 <code>file://</code> 直接打开此页面。请在仓库根目录执行：</p>
+      <code>npm --prefix tools/project_dashboard run dev</code>
+      <p>然后访问 <strong>http://127.0.0.1:4318</strong>。</p>
+    </section>
+    <div id="root"></div>
+    <script>
+      if (window.location.protocol === "file:") {
+        document.querySelector("#file-protocol-help").hidden = false;
+        document.querySelector("#root").hidden = true;
+      }
+    </script>
+    <script type="module" src="/src/client/main.tsx"></script>
+  </body>
+</html>

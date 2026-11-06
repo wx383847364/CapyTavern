@@ -17,3 +17,8 @@ build/
 
 # macOS
 .DS_Store
+
+# 进度控制台依赖与缓存
+tools/project_dashboard/node_modules/
+tools/project_dashboard/dist/
+tools/project_dashboard/.cache/
