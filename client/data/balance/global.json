@@ -1,0 +1,55 @@
+{
+  "_status": "正式 v0.2（2026-11-06，P2a 实测后重调 party_scaling，待测试复核）",
+  "_table": "表4 全局",
+  "tick": 0.05,
+  "time_limit": 120.0,
+  "gcd": 1.0,
+  "crit_chance": 0.1,
+  "crit_mult": 1.5,
+  "heal_threat": 0.5,
+  "defense_formula": {
+    "expr": "reduction = def / (def + K)",
+    "K": 100,
+    "rounding": "最终伤害在全部加成后四舍五入取整，最小为 1；reduction 不单独取整"
+  },
+  "party_scaling": {
+    "1": {
+      "hp": 0.321,
+      "dmg": 0.331
+    },
+    "2": {
+      "hp": 0.34,
+      "dmg": 0.6
+    },
+    "3": {
+      "hp": 0.65,
+      "dmg": 0.85
+    },
+    "4": {
+      "hp": 1.0,
+      "dmg": 1.0
+    }
+  },
+  "wave": [
+    {
+      "enemy": "melee",
+      "x": 1500,
+      "y": 360
+    },
+    {
+      "enemy": "melee",
+      "x": 1500,
+      "y": 720
+    },
+    {
+      "enemy": "caster",
+      "x": 1760,
+      "y": 540
+    },
+    {
+      "enemy": "elite",
+      "x": 1640,
+      "y": 540
+    }
+  ]
+}

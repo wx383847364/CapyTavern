@@ -1,0 +1,251 @@
+{
+  "_status": "正式 v0.1（2026-11-06，策划交付，待测试复核；计算口径见 README.md）",
+  "_table": "表2 技能（16 行）；school 仅伤害类必填，其余不写；restore 类 cost 恒为 0",
+  "skills": {
+    "slam": {
+      "name": "猛击",
+      "cost": 30,
+      "cooldown": 5,
+      "range": 70,
+      "target": "enemy",
+      "school": "physical",
+      "effects": [
+        {
+          "kind": "damage",
+          "amount": 55
+        }
+      ]
+    },
+    "defensive_taunt": {
+      "name": "挑衅守势",
+      "cost": 20,
+      "cooldown": 12,
+      "range": 90,
+      "target": "enemy",
+      "effects": [
+        {
+          "kind": "taunt",
+          "duration": 5
+        },
+        {
+          "kind": "status",
+          "to": "self",
+          "status": "mitigate",
+          "duration": 5,
+          "taken_mult": 0.6
+        }
+      ]
+    },
+    "whirlwind": {
+      "name": "旋风斩",
+      "cost": 40,
+      "cooldown": 8,
+      "range": 0,
+      "target": "self",
+      "school": "physical",
+      "effects": [
+        {
+          "kind": "damage",
+          "amount": 35,
+          "radius": 110,
+          "center": "self"
+        }
+      ]
+    },
+    "bloodrage": {
+      "name": "蓄怒",
+      "cost": 0,
+      "cooldown": 25,
+      "range": 0,
+      "target": "self",
+      "off_gcd": true,
+      "effects": [
+        {
+          "kind": "restore",
+          "amount": 50
+        }
+      ]
+    },
+    "kick_stab": {
+      "name": "破法突刺",
+      "cost": 25,
+      "cooldown": 10,
+      "range": 60,
+      "target": "enemy",
+      "school": "physical",
+      "effects": [
+        {
+          "kind": "damage",
+          "amount": 30
+        },
+        {
+          "kind": "interrupt"
+        }
+      ]
+    },
+    "lethal_strike": {
+      "name": "致命一击",
+      "cost": 55,
+      "cooldown": 7,
+      "range": 60,
+      "target": "enemy",
+      "school": "physical",
+      "effects": [
+        {
+          "kind": "damage",
+          "amount": 85
+        }
+      ]
+    },
+    "feint": {
+      "name": "佯攻",
+      "cost": 20,
+      "cooldown": 20,
+      "range": 0,
+      "target": "self",
+      "effects": [
+        {
+          "kind": "status",
+          "to": "self",
+          "status": "mitigate",
+          "duration": 4,
+          "taken_mult": 0.6
+        }
+      ]
+    },
+    "adrenaline": {
+      "name": "疾攻",
+      "cost": 30,
+      "cooldown": 25,
+      "range": 0,
+      "target": "self",
+      "effects": [
+        {
+          "kind": "status",
+          "to": "self",
+          "status": "haste",
+          "duration": 8,
+          "interval_mult": 0.6
+        }
+      ]
+    },
+    "fire_burst": {
+      "name": "烈焰爆破",
+      "cost": 30,
+      "cooldown": 6,
+      "range": 450,
+      "target": "enemy",
+      "school": "magic",
+      "effects": [
+        {
+          "kind": "damage",
+          "amount": 50,
+          "radius": 100,
+          "center": "target"
+        }
+      ]
+    },
+    "arcane_bolt": {
+      "name": "奥术弹",
+      "cost": 20,
+      "cooldown": 4,
+      "range": 450,
+      "target": "enemy",
+      "school": "magic",
+      "effects": [
+        {
+          "kind": "damage",
+          "amount": 42
+        }
+      ]
+    },
+    "mana_armor": {
+      "name": "魔力护甲",
+      "cost": 15,
+      "cooldown": 18,
+      "range": 0,
+      "target": "self",
+      "effects": [
+        {
+          "kind": "status",
+          "to": "self",
+          "status": "mitigate",
+          "duration": 4,
+          "taken_mult": 0.6
+        }
+      ]
+    },
+    "evocation": {
+      "name": "唤醒",
+      "cost": 0,
+      "cooldown": 30,
+      "range": 0,
+      "target": "self",
+      "off_gcd": true,
+      "effects": [
+        {
+          "kind": "restore",
+          "amount": 60
+        }
+      ]
+    },
+    "greater_heal": {
+      "name": "强效治疗",
+      "cost": 25,
+      "cooldown": 5,
+      "range": 420,
+      "target": "ally",
+      "effects": [
+        {
+          "kind": "heal",
+          "amount": 100
+        }
+      ]
+    },
+    "prayer": {
+      "name": "治疗祷言",
+      "cost": 35,
+      "cooldown": 9,
+      "range": 0,
+      "target": "self",
+      "effects": [
+        {
+          "kind": "heal",
+          "amount": 50,
+          "radius": 300,
+          "center": "self"
+        }
+      ]
+    },
+    "ward": {
+      "name": "护佑",
+      "cost": 20,
+      "cooldown": 14,
+      "range": 420,
+      "target": "ally",
+      "effects": [
+        {
+          "kind": "status",
+          "to": "target",
+          "status": "mitigate",
+          "duration": 5,
+          "taken_mult": 0.6
+        }
+      ]
+    },
+    "meditate": {
+      "name": "冥想",
+      "cost": 0,
+      "cooldown": 30,
+      "range": 0,
+      "target": "self",
+      "off_gcd": true,
+      "effects": [
+        {
+          "kind": "restore",
+          "amount": 50
+        }
+      ]
+    }
+  }
+}

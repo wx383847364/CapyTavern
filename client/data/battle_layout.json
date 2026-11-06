@@ -1,0 +1,39 @@
+{
+  "_note": "程序自有：站位、尺寸和普攻伤害类型。数值表见 data/balance/（design/balance 的原样副本，不手改）。",
+  "unit_radius": 22.0,
+  "arena": {
+    "x": 0,
+    "y": 0,
+    "w": 1920,
+    "h": 1080
+  },
+  "ally_spawn": {
+    "x": 300,
+    "y0": 270,
+    "dy": 180
+  },
+  "wave_positions": [
+    {
+      "x": 1500,
+      "y": 360
+    },
+    {
+      "x": 1500,
+      "y": 720
+    },
+    {
+      "x": 1760,
+      "y": 540
+    },
+    {
+      "x": 1640,
+      "y": 540
+    }
+  ],
+  "attack_school": {
+    "warrior": "physical",
+    "rogue": "physical",
+    "mage": "magic",
+    "priest": "none"
+  }
+}

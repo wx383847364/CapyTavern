@@ -1,0 +1,369 @@
+{
+  "_status": "正式 v0.1（2026-11-06，策划交付）：物品 40 件，不含装备属性（属性已折进职业面板）",
+  "_slots": {
+    "weapon": "武器",
+    "helmet": "头盔",
+    "chest": "胸甲",
+    "shoulder": "肩膀",
+    "legs": "裤子",
+    "boots": "鞋子",
+    "ring": "戒指",
+    "amulet": "护符"
+  },
+  "_sets": {
+    "warrior_set": {
+      "name": "壁垒套装",
+      "class_id": "warrior",
+      "pieces": [
+        "warrior_shoulder_set",
+        "warrior_boots_set"
+      ]
+    },
+    "rogue_set": {
+      "name": "夜行套装",
+      "class_id": "rogue",
+      "pieces": [
+        "rogue_shoulder_set",
+        "rogue_boots_set"
+      ]
+    },
+    "mage_set": {
+      "name": "炽焰套装",
+      "class_id": "mage",
+      "pieces": [
+        "mage_shoulder_set",
+        "mage_boots_set"
+      ]
+    },
+    "priest_set": {
+      "name": "晨曦套装",
+      "class_id": "priest",
+      "pieces": [
+        "priest_shoulder_set",
+        "priest_boots_set"
+      ]
+    }
+  },
+  "rows": [
+    {
+      "id": "warrior_weapon",
+      "name": "旧铁长剑",
+      "slot": "weapon",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_helmet",
+      "name": "铁皮盔",
+      "slot": "helmet",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_chest",
+      "name": "厚皮胸甲",
+      "slot": "chest",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_shoulder",
+      "name": "铁皮护肩",
+      "slot": "shoulder",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_legs",
+      "name": "帆布护腿",
+      "slot": "legs",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_boots",
+      "name": "铁头靴",
+      "slot": "boots",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_ring",
+      "name": "铜质指环",
+      "slot": "ring",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_amulet",
+      "name": "刻痕护符",
+      "slot": "amulet",
+      "class_id": "warrior",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_weapon",
+      "name": "磨亮短刃",
+      "slot": "weapon",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_helmet",
+      "name": "深色兜帽",
+      "slot": "helmet",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_chest",
+      "name": "软皮甲",
+      "slot": "chest",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_shoulder",
+      "name": "软皮护肩",
+      "slot": "shoulder",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_legs",
+      "name": "轻便皮裤",
+      "slot": "legs",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_boots",
+      "name": "软底靴",
+      "slot": "boots",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_ring",
+      "name": "银纹指环",
+      "slot": "ring",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "rogue_amulet",
+      "name": "幸运铜币",
+      "slot": "amulet",
+      "class_id": "rogue",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_weapon",
+      "name": "橡木法杖",
+      "slot": "weapon",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_helmet",
+      "name": "学徒兜帽",
+      "slot": "helmet",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_chest",
+      "name": "学徒长袍",
+      "slot": "chest",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_shoulder",
+      "name": "学徒肩披",
+      "slot": "shoulder",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_legs",
+      "name": "麻布长裤",
+      "slot": "legs",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_boots",
+      "name": "布面短靴",
+      "slot": "boots",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_ring",
+      "name": "水晶指环",
+      "slot": "ring",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "mage_amulet",
+      "name": "星图坠饰",
+      "slot": "amulet",
+      "class_id": "mage",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_weapon",
+      "name": "白杉短杖",
+      "slot": "weapon",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_helmet",
+      "name": "亚麻头巾",
+      "slot": "helmet",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_chest",
+      "name": "白色法衣",
+      "slot": "chest",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_shoulder",
+      "name": "亚麻披肩",
+      "slot": "shoulder",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_legs",
+      "name": "亚麻长裤",
+      "slot": "legs",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_boots",
+      "name": "布面凉鞋",
+      "slot": "boots",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_ring",
+      "name": "铜铃指环",
+      "slot": "ring",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "priest_amulet",
+      "name": "圣徽",
+      "slot": "amulet",
+      "class_id": "priest",
+      "source": "initial",
+      "set_id": null
+    },
+    {
+      "id": "warrior_shoulder_set",
+      "name": "壁垒肩甲",
+      "slot": "shoulder",
+      "class_id": "warrior",
+      "source": "reward",
+      "set_id": "warrior_set"
+    },
+    {
+      "id": "warrior_boots_set",
+      "name": "壁垒战靴",
+      "slot": "boots",
+      "class_id": "warrior",
+      "source": "reward",
+      "set_id": "warrior_set"
+    },
+    {
+      "id": "rogue_shoulder_set",
+      "name": "夜行肩垫",
+      "slot": "shoulder",
+      "class_id": "rogue",
+      "source": "reward",
+      "set_id": "rogue_set"
+    },
+    {
+      "id": "rogue_boots_set",
+      "name": "夜行软靴",
+      "slot": "boots",
+      "class_id": "rogue",
+      "source": "reward",
+      "set_id": "rogue_set"
+    },
+    {
+      "id": "mage_shoulder_set",
+      "name": "炽焰肩披",
+      "slot": "shoulder",
+      "class_id": "mage",
+      "source": "reward",
+      "set_id": "mage_set"
+    },
+    {
+      "id": "mage_boots_set",
+      "name": "炽焰长靴",
+      "slot": "boots",
+      "class_id": "mage",
+      "source": "reward",
+      "set_id": "mage_set"
+    },
+    {
+      "id": "priest_shoulder_set",
+      "name": "晨曦披肩",
+      "slot": "shoulder",
+      "class_id": "priest",
+      "source": "reward",
+      "set_id": "priest_set"
+    },
+    {
+      "id": "priest_boots_set",
+      "name": "晨曦凉鞋",
+      "slot": "boots",
+      "class_id": "priest",
+      "source": "reward",
+      "set_id": "priest_set"
+    }
+  ]
+}

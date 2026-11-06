@@ -1,0 +1,77 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1"]
+
+[node name="Main" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("1")
+
+[node name="Title" type="Label" parent="."]
+layout_mode = 0
+offset_left = 40.0
+offset_top = 32.0
+offset_right = 900.0
+offset_bottom = 80.0
+theme_override_font_sizes/font_size = 36
+text = "CapyTavern P1 战斗灰盒"
+
+[node name="Echo" type="Label" parent="."]
+layout_mode = 0
+offset_left = 40.0
+offset_top = 110.0
+offset_right = 1880.0
+offset_bottom = 170.0
+theme_override_font_sizes/font_size = 28
+text = "(按键或点击,这里显示动作名)"
+
+[node name="Menu" type="VBoxContainer" parent="."]
+layout_mode = 0
+offset_left = 40.0
+offset_top = 220.0
+offset_right = 640.0
+offset_bottom = 640.0
+theme_override_constants/separation = 14
+
+[node name="Hint" type="Label" parent="Menu"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "选择出战人数（数值 v0.1，待复核）："
+
+[node name="Start1" type="Button" parent="Menu"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "1 人出战（战士）"
+
+[node name="Start2" type="Button" parent="Menu"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "2 人出战（战士 + 牧师，空槽 2、3）"
+
+[node name="Start3" type="Button" parent="Menu"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "3 人出战（战士 + 法师 + 牧师）"
+
+[node name="Start4" type="Button" parent="Menu"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "4 人出战（战士 盗贼 法师 牧师）"
+
+[node name="Keys" type="Label" parent="."]
+layout_mode = 0
+offset_left = 700.0
+offset_top = 220.0
+offset_right = 1880.0
+offset_bottom = 640.0
+theme_override_font_sizes/font_size = 24
+text = "战斗操作：
+1～4 / 点头像 / 点己方角色：选人（空槽无效）
+左键点地：移动　右键点敌人：攻击　牧师右键点队友：治疗
+Q W E R：当前角色的四个技能（按住不连发）
+P：暂停 / 继续　Enter：结算后返回
+
+命令行：-- --battle=1..4 [--classes=warrior,,mage,] [--seed=N] [--autoplay [--fast] [--passive]]"

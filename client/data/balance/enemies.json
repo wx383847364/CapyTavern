@@ -1,0 +1,67 @@
+{
+  "_status": "正式 v0.1（2026-11-06，策划交付，待测试复核；计算口径见 README.md）",
+  "_table": "表3 敌人（3 行）；精英预警约 2 秒即 spell.cast_time，不另设字段",
+  "melee": {
+    "name": "近战小怪",
+    "color": "8a3b3b",
+    "radius": 22,
+    "max_hp": 880,
+    "speed": 110,
+    "attack_range": 56,
+    "damage": 23,
+    "interval": 1.5,
+    "school": "physical",
+    "armor": 20,
+    "magic_resist": 0
+  },
+  "caster": {
+    "name": "施法小怪",
+    "color": "7a4a9a",
+    "radius": 20,
+    "max_hp": 550,
+    "speed": 90,
+    "attack_range": 0,
+    "damage": 0,
+    "interval": 1.0,
+    "school": "physical",
+    "armor": 0,
+    "magic_resist": 30,
+    "spell": {
+      "id": "shadow_bolt",
+      "name": "暗影箭",
+      "cast_time": 2.0,
+      "cooldown": 3.0,
+      "first_at": 2.0,
+      "range": 380,
+      "damage": 95,
+      "radius": 0,
+      "school": "magic",
+      "interruptible": true
+    }
+  },
+  "elite": {
+    "name": "精英",
+    "color": "5a2020",
+    "radius": 32,
+    "max_hp": 2300,
+    "speed": 85,
+    "attack_range": 70,
+    "damage": 44,
+    "interval": 2.0,
+    "school": "physical",
+    "armor": 40,
+    "magic_resist": 20,
+    "spell": {
+      "id": "quake",
+      "name": "震地",
+      "cast_time": 2.0,
+      "cooldown": 10.0,
+      "first_at": 8.0,
+      "range": 600,
+      "damage": 100,
+      "radius": 150,
+      "school": "physical",
+      "interruptible": false
+    }
+  }
+}
