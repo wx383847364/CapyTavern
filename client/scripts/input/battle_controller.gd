@@ -79,7 +79,7 @@ func selected_unit() -> BattleSim.Unit:
 	return sim.slot_unit(selected_slot) if sim != null and selected_slot >= 0 else null
 
 
-## 真人只通过数字键或功能键换人；兼容入口仍可调用同一槽位选择。
+## 切换槽位后同步交出当前角色的 AI 控制，再通知界面清理上一角色的反馈。
 func select_slot(slot_index: int) -> bool:
 	if _skill_input_mode and not _skill_binding_current():
 		return false
@@ -90,6 +90,8 @@ func select_slot(slot_index: int) -> bool:
 	if slot_index != selected_slot:
 		selected_slot = slot_index
 		_reset_tab()
+		if sim.controlled_actor_id >= 0:
+			sim.set_controlled_actor(selected_unit().id)
 		events.select(slot_index)
 	return true
 
@@ -195,19 +197,26 @@ func player_right_click(pos: Vector2, target_id: int = -1) -> void:
 		sim.order_move(actor.id, pos)
 
 
-## 从已有技能定义投影瞄准形态；技能身份与实际落点由模拟器在执行时再验证。
+## 投影合法目标及实际地面落点，单位超距时仍允许提交接近命令。
 func aim_view(key: String, pointer: Vector2, on_ground: bool) -> Dictionary:
 	var actor := selected_unit()
 	if actor == null or not actor.alive:
 		return {}
-	var skill: Dictionary = actor.resolved_slots.get(key, {}) if _skill_input_mode else actor.skills.get(key, {})
+	var from_resource := _skill_input_mode and actor.spec_id != "mage.frost"
+	var skill: Dictionary = actor.resolved_slots.get(key, {}) if from_resource else actor.skills.get(key, {})
 	if skill.is_empty():
 		return {}
 	var target := target_for(actor)
 	var target_kind := String(skill.get("target_kind", skill.get("target", ""))).to_upper()
 	var burst: bool = skill.get("skill_id", skill.get("id")) in ["mage.fire.flame_burst", "fire_burst"]
-	var scale := BattleSim.SCENE_UNITS_PER_METER if _skill_input_mode else 1.0
+	var scale := BattleSim.SCENE_UNITS_PER_METER if from_resource else 1.0
 	var reach := float(skill.get("cast_range_m", skill.get("range", 0.0))) * scale
+	if target_kind == "DIRECTION":
+		var landing := sim.blink_landing(actor, pointer, reach)
+		return {"aim": {"point": pointer}, "ground": true, "direction": true,
+			"center": landing if landing.is_finite() else actor.pos, "radius": actor.radius, "reach": reach,
+			"origin": actor.pos, "valid": on_ground and landing.is_finite(), "reason": "NO_BLINK_LANDING",
+			"show": true, "target": -1}
 	var radius := 0.0
 	for effect: Dictionary in skill["effects"]:
 		radius = maxf(radius, float(effect.get("radius_m", effect.get("radius", 0.0))) * scale)
@@ -221,9 +230,14 @@ func aim_view(key: String, pointer: Vector2, on_ground: bool) -> Dictionary:
 		center = target.pos
 	var location_ok := on_ground and sim.has_arena_point(center) if is_ground else (target_kind == "SELF" or matches)
 	var in_range := target_kind == "SELF" or actor.pos.distance_to(center) <= reach
+	var approach := sim.player_controls and location_ok and not is_ground and not in_range
 	var aim: Dictionary = {"point": center} if is_ground else {"target": target_id}
+	if is_ground and location_ok and sim.player_controls:
+		center = sim.ground_cast_center(actor.pos, pointer, reach)
+		if not from_resource:
+			aim["point"] = center
 	return {"aim": aim, "ground": is_ground, "center": center, "radius": radius, "reach": reach,
-		"origin": actor.pos, "valid": location_ok and in_range,
+		"origin": actor.pos, "valid": location_ok and (in_range or approach or (is_ground and sim.player_controls)), "approach": approach,
 		"reason": "out_of_range" if location_ok else "no_target",
 		"show": is_ground or matches or target_kind == "SELF", "target": -1 if is_ground or target_kind == "SELF" else target_id}
 
@@ -290,7 +304,7 @@ func on_right_click(world_pos: Vector2) -> void:
 		sim.order_heal(unit.id, ally.id)
 
 
-## Q/W/E/R 由调用方过滤重复按下；隔离返回只表示入队。旧两字段场仍只接唤醒。
+## 正式输入返回入队状态。混编真人允许接近，具体施法由模拟器结算。
 func press_skill(key: String, aim: Dictionary = {}) -> bool:
 	if _skill_input_mode:
 		if not _skill_binding_current():
@@ -333,10 +347,21 @@ func press_skill(key: String, aim: Dictionary = {}) -> bool:
 	var unit := selected_unit()
 	if unit == null:
 		return false
-	last_input = {"queued": false, "reason": sim.check_cast(unit.id, key, aim).get("reason", "")}
+	var check := sim.check_cast(unit.id, key, aim, sim.player_controls and aim.has("target"))
 	var applied := sim.cast_skill(unit.id, key, aim)
-	last_input["queued"] = applied
+	last_input = {"queued": applied, "reason": "" if applied else check["reason"]}
 	return applied
+
+
+## 撤回当前角色尚未施放的命令。正式场和移动、施法按同一队列排序。
+func cancel_skill_approach() -> void:
+	var actor := selected_unit()
+	if actor == null or not sim.player_controls:
+		return
+	if _skill_input_mode:
+		sim._enqueue_skill_command("cancel_cast", {"battle_id": _skill_bound_id, "caster_id": actor.id})
+	else:
+		sim.cancel_player_approach(actor.id)
 
 
 ## 暂停仍交模拟器处理；隔离绑定失效时不能影响新场。

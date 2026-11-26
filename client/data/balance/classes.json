@@ -78,6 +78,16 @@
       "regen": 3,
       "on_attack": 0
     },
+    "frost": {
+      "attack_damage": 8,
+      "power": 74,
+      "skills": {
+        "q": "mage.frost.frostbolt",
+        "w": "mage.frost.frost_nova",
+        "e": "mage.frost.blink",
+        "r": "mage.frost.ice_block"
+      }
+    },
     "skills": {
       "q": "fire_burst",
       "w": "arcane_bolt",

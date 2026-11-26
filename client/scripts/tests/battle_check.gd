@@ -70,7 +70,7 @@ func _initialize() -> void:
 	_s1b4_tree_cases.call_deferred()
 
 
-## 执行旧机制和真人操作回归。
+## 执行既有机制回归，并覆盖正式、混编的寒霜和手动超距接近。
 func _run_all() -> void:
 	_full_battles()
 	_invalid_skills()
@@ -81,6 +81,10 @@ func _run_all() -> void:
 	_player_control_cases()
 	_ally_ai_cases()
 	_player_threat_cases()
+	_projectile_lifecycle_cases()
+	_frost_cases()
+	_approach_cases()
+	_ground_cast_cases()
 	for primary_index: int in [0, 2, 3]:
 		_player_whirlwind_case(primary_index, false)
 	_player_whirlwind_case(0, true)
@@ -477,7 +481,420 @@ func _player_threat_cases() -> void:
 	_check("真人战斗结束清除交战仇恨", first.engaged_allies.is_empty() and first.threat.is_empty())
 
 
-## 用实际四人配表测试一次旋风斩承接两轮法师技能，并单独记录开启普攻时的表现。
+## 正式法师分别验证飞行中的目标死亡、来源死亡和暂停，已支付的法力不重复扣缴。
+func _projectile_lifecycle_cases() -> void:
+	for lose_target: bool in [true, false]:
+		var sim := BattleSim.new()
+		var bus := BattleEvents.new()
+		var cfg := BattleConfig.load_config()
+		var slots := ["mage", "priest", "", ""]
+		var locked := {"slots": slots, "specs": BattleConfig.formal_specs(slots), "sets": []}
+		var problems := sim.prepare_formal_sortie(cfg, locked, 121, bus, BattleConfig.load_skill_catalog())
+		_check("正式飞弹生命周期预检", problems.is_empty(), str(problems))
+		if not problems.is_empty():
+			return
+		var controller := BattleController.new()
+		if not controller.setup(sim, bus):
+			_check("正式飞弹生命周期绑定", false)
+			return
+		var mage := sim.slot_unit(0)
+		var priest := sim.slot_unit(1)
+		var target := sim.living("enemy")[0]
+		sim.player_controls = true
+		sim.set_controlled_actor(mage.id)
+		mage.pos = Vector2(500, 330)
+		target.pos = Vector2(1100, 330)
+		for foe in sim.living("enemy"):
+			foe.speed = 0.0
+			foe.next_attack_at = INF
+			foe.cast_cd_until = INF
+		var outcomes: Array[Dictionary] = []
+		# 记录同一请求唯一最终结果，发射本身只提交费用。
+		bus.cast_resolved.connect(func(result: Dictionary) -> void: outcomes.append(result))
+		controller.select_target(target.id)
+		var before := target.hp
+		var accepted := controller.submit_player_skill("w", Vector2.ZERO, false)
+		for step in 25:
+			sim.step(0.05)
+		_check("正式飞弹：发射只扣一次费用", accepted and outcomes.is_empty()
+			and sim._player_projectiles.size() == 1 and mage.res == 85.0 and target.hp == before)
+		sim.set_paused(true)
+		var paused_frame: Array = sim.snapshot()["projectiles"]
+		sim.step(0.5)
+		_check("正式飞弹：暂停保留原飞行进度", sim.snapshot()["projectiles"] == paused_frame and target.hp == before)
+		sim.set_paused(false)
+		controller.select_slot(priest.slot)
+		if lose_target:
+			sim._down(target, priest.id)
+		else:
+			sim._down(mage, target.id)
+		for step in 10:
+			sim.step(0.05)
+		var result: Dictionary = outcomes[0] if outcomes.size() == 1 else {}
+		_check("正式飞弹：目标先倒下只报告落空" if lose_target else "正式飞弹：来源倒下仍命中，死亡来源不再进仇恨表",
+			sim._player_projectiles.is_empty() and not sim.finished and not target.threat.has(mage.id)
+			and (result.get("reason") == "PROJECTILE_MISSED" if lose_target else
+				(result.get("accepted", false) and target.hp < before and not target.engaged_allies.has(mage.id))))
+
+
+## 用真实波次分别进入法牧正式场和四人混编，固定非被测敌人以精确验收每个技能。
+func _frost_cases() -> void:
+	for slots: Array in [["mage", "priest", "", ""], ["mage", "warrior", "rogue", "priest"]]:
+		var cfg := BattleConfig.load_config({"mage_spec": BattleConfig.MAGE_FROST})
+		cfg["crit_chance"] = 0.0
+		var specs := BattleConfig.formal_specs(slots, BattleConfig.MAGE_FROST)
+		var label := "寒霜正式 " if not specs.is_empty() else "寒霜混编 "
+		var sim := BattleSim.new()
+		var bus := BattleEvents.new()
+		if specs.is_empty():
+			sim.setup(cfg, slots, 131, bus)
+		else:
+			var problems := sim.prepare_formal_sortie(cfg, {"slots": slots, "specs": specs, "sets": ["mage"]}, 131, bus, BattleConfig.load_skill_catalog())
+			_check(label + "出征预检", problems.is_empty(), str(problems))
+			if not problems.is_empty():
+				continue
+		sim.player_controls = true
+		var controller := BattleController.new()
+		if not controller.setup(sim, bus):
+			_check(label + "控制器绑定", false)
+			continue
+		var mage := sim.slot_unit(0)
+		sim.set_controlled_actor(mage.id)
+		_check(label + "四槽及普攻", mage.spec_id == BattleConfig.MAGE_FROST and mage.attack_damage == 8.0 and mage.attack_interval == 1.4
+			and sim.snapshot()["skills"][mage.id][0]["name"] == "寒冰箭" and sim.snapshot()["skills"][mage.id][3]["name"] == "冰箱")
+		var enemies := sim.living("enemy")
+		var melee := enemies[0]
+		var caster := enemies[2]
+		var boss := enemies[3]
+		for enemy: BattleSim.Unit in enemies:
+			enemy.pos = Vector2(1700, 320 + 160 * enemies.find(enemy))
+			enemy.speed = 0.0
+			enemy.next_attack_at = INF
+			enemy.cast_cd_until = INF
+		mage.pos = Vector2(500, 500)
+		melee.pos = Vector2(1100, 500)
+		# 牧师的自动治疗会掩盖解冻后的小怪普攻，本段固定住其他队员的普通动作。
+		for ally: BattleSim.Unit in sim.living("ally"):
+			ally.next_attack_at = INF
+		mage.res_regen = 0.0
+		controller.select_target(melee.id)
+
+		# 固定步逐次推进，观察原地读条、发射扣费、飞行、后续读条和移动取消。
+		var melee_hp := melee.hp
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		_check(label + "Q 起手锁目标且不扣蓝", not mage.cast.is_empty() and mage.res == 100.0 and melee.hp == melee_hp)
+		for index in 29:
+			sim.step(0.05)
+		_check(label + "Q 到 1.5 秒前仍在读条", not sim.formal_skill_sortie or (not mage.cast.is_empty() and mage.res == 100.0))
+		sim.step(0.05)
+		_check(label + "Q 发射一次扣 6 蓝，命中前保持血量", mage.cast.is_empty() and mage.res == 94.0
+			and sim.snapshot()["projectiles"].size() == 1 and melee.hp == melee_hp)
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		_check(label + "Q 无独立或公共冷却阻碍下一发", not mage.cast.is_empty() and mage.res == 94.0)
+		controller.player_right_click(mage.pos + Vector2(0, 70), -1)
+		for index in 7:
+			sim.step(0.05)
+		_check(label + "移动只取消未发射的 Q，已发射命中 61，未再次扣蓝", mage.cast.is_empty()
+			and mage.res == 94.0 and melee.hp == melee_hp - 61.0)
+
+		# 近战和正在读条的施法小怪同时入圈，精英也在圈内。
+		mage.pos = Vector2(600, 500)
+		mage.order_kind = "none"
+		melee.pos = mage.pos + Vector2(50, 0)
+		caster.pos = mage.pos + Vector2(0, 270)
+		boss.pos = mage.pos + Vector2(200, 0)
+		var boss_hp := boss.hp
+		var before_nova := melee.hp
+		melee.next_attack_at = sim.time
+		sim._start_cast(caster, mage)
+		var before_freezing := mage.hp
+		controller.submit_player_skill("w", Vector2.ZERO, false)
+		sim.step(0.05)
+		var frozen_until := float(caster.statuses.get("frozen", {}).get("until", 0.0))
+		_check(label + "W 伤害低于 Q，冻结两类小怪且 Boss 全免疫", mage.res == 82.0 and melee.hp == before_nova - 44.0
+			and melee.statuses.has("frozen") and frozen_until > sim.time and not boss.statuses.has("frozen") and boss.hp == boss_hp)
+		var frozen_progress := float(sim.snapshot()["units"].filter(
+			# 快照按单位身份读取冻住的读条，不依赖绘制顺序。
+			func(unit: Dictionary) -> bool: return unit["id"] == caster.id)[0]["cast"]["progress"])
+		var frozen_pos := melee.pos
+		melee.speed = 110.0
+		for index in 40:
+			sim.step(0.05)
+		_check(label + "完全冻结：位置、普攻和读条均停住", melee.pos == frozen_pos and mage.hp == before_freezing
+			and not caster.cast.is_empty() and is_equal_approx(float(caster.statuses.get("frozen", {}).get("started_at", -1)), float(caster.cast["started"]) + frozen_progress * 2.0))
+		while sim.time < frozen_until + 0.1:
+			sim.step(0.05)
+		_check(label + "解冻后恢复原暗影箭，近战恢复攻击", not caster.statuses.has("frozen") and not caster.cast.is_empty() and mage.hp < before_freezing)
+		melee.pos = Vector2(1550, 850)
+		caster.pos = Vector2(1550, 980)
+		mage.cd_until["w"] = 0.0
+		var empty_nova := sim.check_cast(mage.id, "w")
+		_check(label + "W 只够到首领时拒绝且保留蓝量和冷却", not empty_nova["ok"]
+			and empty_nova["reason"] == "NO_FREEZE_TARGET" and mage.res == 82.0 and mage.cd_until["w"] == 0.0)
+
+		# 从震地中心闪开，随后覆盖被占终点和场边的同方向裁剪。
+		mage.pos = Vector2(600, 500)
+		boss.pos = Vector2(700, 500)
+		sim._start_cast(boss, mage)
+		controller.select_target(boss.id)
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		controller.submit_player_skill("e", Vector2(1200, 500), true)
+		sim.step(0.05)
+		_check(label + "E 脱离震地，打断 Q 且只花闪现的 8 蓝", mage.pos.is_equal_approx(Vector2(1200, 500))
+			and mage.res == 74.0 and mage.cast.is_empty() and mage.pos.distance_to(boss.cast["center"]) > float(boss.cast["radius"]))
+		var before_quake := mage.hp
+		sim._resolve_cast(boss)
+		_check(label + "震地按闪现后的落点判定", mage.hp == before_quake)
+		mage.pos = Vector2(1600, 500)
+		melee.pos = Vector2(1898, 500)
+		_check(label + "E 贴边可找最远点，终点被占则沿射线回退",
+			sim.blink_landing(mage, Vector2(1900, 500), 600.0).is_equal_approx(Vector2(1854, 500)))
+		melee.pos = Vector2(1600, 820)
+		_check(label + "E 终点空闲时停在边界内", sim.blink_landing(mage, Vector2(1900, 500), 600.0).is_equal_approx(Vector2(1898, 500)))
+
+		# 将冰箱与仍有仇恨的 Boss 放在同一交战，精确检查每一跳和解冻伤害。
+		mage.hp = 100.0
+		mage.res = 0.0
+		mage.res_regen = 3.0
+		caster.cast = {}
+		boss.pos = mage.pos + Vector2(62, 0)
+		boss.threat[mage.id] = 100.0
+		boss.next_attack_at = sim.time
+		controller.submit_player_skill("r", Vector2.ZERO, false)
+		sim.step(0.05)
+		var block_active: Dictionary = mage.statuses.get("ice_block", {})
+		var ice_started := float(block_active.get("until", sim.time)) - 6.0
+		var initial_res := mage.res
+		sim._damage(boss, mage, 999.0, "quake", false)
+		_check(label + "R 无敌且禁止行动，保留既有仇恨和 45 秒冷却", not block_active.is_empty() and mage.hp == 100.0
+			and boss.threat[mage.id] == 100.0 and not sim.order_move(mage.id, mage.pos + Vector2.UP * 100.0)
+			and is_equal_approx(float(mage.cd_until.get("r", 0.0)), ice_started + 45.0))
+		boss.next_attack_at = INF
+		for tick in range(1, 7):
+			while sim.time + 0.0000000001 < ice_started + float(tick):
+				sim.step(0.05)
+			_check(label + "R 第 %d 跳只回复一次生命和法力" % tick, is_equal_approx(mage.hp, 100.0 + 31.25 * tick)
+				and is_equal_approx(mage.res, minf(100.0, initial_res + 100.0 / 6.0 * tick)),
+				"t=%s hp=%s res=%s" % [sim.time, mage.hp, mage.res])
+		_check(label + "R 六秒后解除无敌", not mage.statuses.has("ice_block") and is_equal_approx(mage.hp, 287.5))
+		sim._damage(boss, mage, 25.0, "quake", false)
+		_check(label + "R 结束后再次受到伤害，保留小数生命", mage.hp < 287.5 and is_equal_approx(fmod(mage.hp, 1.0), 0.5))
+
+		# 切走控制权后只授权 AI 读 Q，并验证新预警出现时主动停读条避让。
+		var teammate := sim.slot_unit(slots.find("priest"))
+		sim.ally_ai_enabled = true
+		sim.set_controlled_actor(teammate.id)
+		sim._open_ally_combat(teammate, melee.id)
+		mage.order_kind = "none"
+		mage.pos = Vector2(600, 500)
+		melee.pos = Vector2(1100, 500)
+		melee.next_attack_at = INF
+		boss.pos = Vector2(1000, 500)
+		sim.step(0.05)
+		_check(label + "切人后安全位置自动读 Q，W E R 继续手动", mage.cast.get("skill_id") == "mage.frost.frostbolt"
+			and mage.cast.get("command", {}).get("automatic", false) and mage.cd_until["w"] == 0.0)
+		sim._start_cast(boss, mage)
+		sim.step(0.05)
+		_check(label + "队友 AI 取消 Q 并避让新出现的震地", mage.cast.is_empty() and mage.ai_evading
+			and mage.pos.distance_to(boss.cast["center"]) > 0.0)
+
+
+
+## 用真实玩家控制器覆盖两条出征路径。其他单位静止，固定步只推进被测的手动命令。
+func _approach_cases() -> void:
+	for formal: bool in [false, true]:
+		var slots := ["mage", "priest", "", ""] if formal else ["mage", "priest", "warrior", "rogue"]
+		var tag := "超距正式 " if formal else "超距混编 "
+		var cfg := BattleConfig.load_config({"mage_spec": BattleConfig.MAGE_FROST})
+		cfg["crit_chance"] = 0.0
+		var sim := BattleSim.new()
+		var bus := BattleEvents.new()
+		if formal:
+			var specs := BattleConfig.formal_specs(slots, BattleConfig.MAGE_FROST)
+			var problems := sim.prepare_formal_sortie(cfg, {"slots": slots, "specs": specs, "sets": []}, 131, bus, BattleConfig.load_skill_catalog())
+			_check(tag + "初始化", problems.is_empty(), str(problems))
+			if not problems.is_empty():
+				continue
+		else:
+			sim.setup(cfg, slots, 131, bus)
+		sim.player_controls = true
+		sim.ally_ai_enabled = true
+		var controller := BattleController.new()
+		if not controller.setup(sim, bus):
+			_check(tag + "绑定", false)
+			continue
+		var mage := sim.slot_unit(0)
+		var priest := sim.slot_unit(1)
+		sim.set_controlled_actor(mage.id)
+		var enemies := sim.living("enemy")
+		var target := enemies[0]
+		var other := enemies[1]
+		var boss := enemies[3]
+		for enemy: BattleSim.Unit in enemies:
+			enemy.pos = Vector2(1740, 220 + enemies.find(enemy) * 190)
+			enemy.speed = 0.0
+			enemy.next_attack_at = INF
+			enemy.cast_cd_until = INF
+		for ally: BattleSim.Unit in sim.living("ally"):
+			ally.next_attack_at = INF
+			ally.res_regen = 0.0
+		mage.pos = Vector2(420, 500)
+		priest.pos = Vector2(300, 230)
+		target.pos = Vector2(1500, 500)
+		mage.res = 5.0
+		controller.select_target(target.id)
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		_check(tag + "仅超距可接近，缺蓝留在原处", mage.pos == Vector2(420, 500) and mage.cast_approach.is_empty() and mage.res == 5.0)
+		mage.res = 50.0
+		var submitted := controller.submit_player_skill("q", Vector2.ZERO, false)
+		# 同一帧下令后立即暂停，恢复时也必须消费正式队列中的该请求。
+		sim.set_paused(true)
+		sim.step(0.05)
+		sim.set_paused(false)
+		sim.step(0.05)
+		_check(tag + "有效输入锁定目标，接近阶段零扣蓝和零冷却", submitted and mage.cast_approach.get("target_id") == target.id
+			and mage.pos.x > 420.0 and mage.res == 50.0 and mage.cd_until.is_empty())
+		# 观察另一个目标与切换控制者都不改变之前锁定的单位。
+		controller.select_target(other.id)
+		target.pos.x += 130.0
+		controller.select_slot(priest.slot)
+		var stopped_at := mage.pos
+		sim.set_paused(true)
+		sim.step(0.5)
+		_check(tag + "暂停冻结接近并保留命令", mage.pos == stopped_at and mage.cast_approach.get("target_id") == target.id)
+		sim.set_paused(false)
+		for tick in 90:
+			if not mage.cast.is_empty():
+				break
+			sim.step(0.05)
+		var distance := mage.pos.distance_to(target.pos)
+		_check(tag + "切去牧师后仍跟到移动目标，停在寒冰箭射程边缘读条",
+			mage.cast.get("target_id") == target.id and distance <= 800.0 and distance >= 760.0 and mage.res == 50.0, str(distance))
+		controller.select_slot(mage.slot)
+		var healed_hp := target.hp
+		for tick in 55:
+			sim.step(0.05)
+		_check(tag + "一条命令只发射一次，只命中锁定单位", target.hp == healed_hp - 61.0 and mage.res == 44.0
+			and mage.cast.is_empty() and mage.cast_approach.is_empty() and sim._player_projectiles.is_empty())
+
+		# 把预警放在接近路线正前方，角色应停在边缘，预警结束后才继续。
+		mage.pos = Vector2(500, 500)
+		target.pos = Vector2(1500, 500)
+		sim._start_cast(boss, mage)
+		boss.cast["center"] = Vector2(700, 500)
+		boss.cast["ends_at"] = sim.time + 3.0
+		controller.select_target(target.id)
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		for tick in 36:
+			sim.step(0.05)
+		var wait_x := mage.pos.x
+		_check(tag + "前方预警挡路超过一秒仍等待", wait_x < 550.0 and not mage.cast_approach.is_empty() and mage.res == 44.0, str(wait_x))
+		for tick in 32:
+			sim.step(0.05)
+		_check(tag + "预警结束自动恢复接近", mage.pos.x > wait_x and not mage.cast_approach.is_empty())
+		controller.player_right_click(mage.pos + Vector2(0, 100))
+		sim.step(0.05)
+		_check(tag + "右键接管取消旧施法", mage.cast_approach.is_empty() and mage.order_kind == "move" and mage.res == 44.0)
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		controller.cancel_skill_approach()
+		sim.step(0.05)
+		_check(tag + "Esc 取消尚未出手的命令", mage.cast_approach.is_empty() and mage.cast.is_empty())
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		controller.select_target(other.id)
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		_check(tag + "新的有效技能命令覆盖旧目标", mage.cast_approach.get("target_id") == other.id and mage.res == 44.0)
+		controller.player_right_click(target.pos, target.id)
+		sim.step(0.05)
+		_check(tag + "右键指定攻击对象取消旧技能", mage.cast_approach.is_empty() and mage.manual_target_id == target.id)
+		controller.select_target(target.id)
+
+		var speed := mage.speed
+		mage.speed = 0.0
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		for tick in 25:
+			sim.step(0.05)
+		_check(tag + "安全路线原地卡住一秒后取消", mage.cast_approach.is_empty() and mage.res == 44.0)
+		mage.speed = speed
+		controller.submit_player_skill("q", Vector2.ZERO, false)
+		sim.step(0.05)
+		sim._down(target, mage.id)
+		sim.step(0.05)
+		_check(tag + "目标倒下后取消，其他存活目标不会被命中", mage.cast_approach.is_empty() and mage.res == 44.0 and other.hp == other.max_hp)
+
+		# 验证相同机制处理队友目标和短射程技能，使用各自原结算。
+		if formal:
+			controller.select_slot(priest.slot)
+			sim.set_controlled_actor(priest.id)
+			priest.pos = Vector2(300, 300)
+			mage.pos = Vector2(1350, 300)
+			mage.hp = 100.0
+			mage.speed = 0.0
+			controller.select_target(mage.id)
+			controller.submit_player_skill("q", Vector2.ZERO, false)
+			sim.step(0.05)
+			_check(tag + "强效治疗接近友方时不预扣资源", priest.cast_approach.get("target_id") == mage.id and priest.res == 100.0)
+			for tick in 50:
+				sim.step(0.05)
+			_check(tag + "牧师进射程后实际治疗", mage.hp > 100.0 and priest.res == 75.0 and priest.cast_approach.is_empty())
+		else:
+			var warrior := sim.slot_unit(2)
+			controller.select_slot(warrior.slot)
+			sim.set_controlled_actor(warrior.id)
+			warrior.pos = other.pos - Vector2(230, 0)
+			var before := other.hp
+			controller.select_target(other.id)
+			controller.submit_player_skill("q", Vector2.ZERO, false)
+			sim.step(0.05)
+			_check(tag + "猛击按近战技能射程接近", warrior.cast_approach.get("target_id") == other.id and other.hp == before)
+			for tick in 26:
+				sim.step(0.05)
+			_check(tag + "猛击到射程自动命中一次", other.hp < before and warrior.cast_approach.is_empty())
+
+
+## 两条真人入口都把超距地面落点裁回边缘，预览、命中与原地施放一致。
+func _ground_cast_cases() -> void:
+	for formal: bool in [false, true]:
+		var cfg := BattleConfig.load_config({"modifiers": false})
+		var slots := ["mage", "priest", "", ""] if formal else ["mage", "priest", "warrior", ""]
+		var sim := BattleSim.new()
+		var bus := BattleEvents.new()
+		if formal:
+			var problems := sim.prepare_formal_sortie(cfg, {"slots": slots, "specs": BattleConfig.formal_specs(slots), "sets": []}, 131, bus, BattleConfig.load_skill_catalog())
+			_check("地面爆破正式初始化", problems.is_empty(), str(problems))
+			if not problems.is_empty():
+				continue
+		else:
+			sim.setup(cfg, slots, 131, bus)
+		sim.player_controls = true
+		var controller := BattleController.new()
+		if not controller.setup(sim, bus):
+			_check("地面爆破绑定", false)
+			continue
+		var mage := sim.slot_unit(0)
+		sim.set_controlled_actor(mage.id)
+		mage.pos = Vector2(500, 500)
+		var pointer := Vector2(1650, 650)
+		var preview := controller.aim_view("q", pointer, true)
+		var reach := 800.0 if formal else 450.0
+		var center: Vector2 = preview["center"]
+		var target := sim.living("enemy")[0]
+		target.pos = center
+		var before := target.hp
+		controller.submit_player_skill("q", pointer, true)
+		sim.step(0.05)
+		_check("地面爆破 %s 预览与结算在射程边缘，法师原地命中" % ("正式" if formal else "混编"),
+			preview["valid"] and absf(center.distance_to(mage.pos) - reach) < 0.01 and mage.pos == Vector2(500, 500)
+			and target.hp < before and mage.cast_approach.is_empty())
+
+
+## 用四人配表等待每轮 W 的飞弹实际命中，再核对一次旋风斩是否拉稳。
 func _player_whirlwind_case(primary_index: int, natural_attacks: bool) -> void:
 	var config := BattleConfig.load_config({"talents": {"mage": "t1", "priest": "t2"}, "sets": ["mage"]})
 	if not natural_attacks:
@@ -489,6 +906,7 @@ func _player_whirlwind_case(primary_index: int, natural_attacks: bool) -> void:
 	var tank := sim.slot_unit(0)
 	var mage := sim.slot_unit(2)
 	var priest := sim.slot_unit(3)
+	sim.set_controlled_actor(tank.id)
 	var foes := sim.living("enemy")
 	var primary := foes[primary_index]
 	var companion := foes[1]
@@ -510,6 +928,8 @@ func _player_whirlwind_case(primary_index: int, natural_attacks: bool) -> void:
 		mage.next_attack_at = INF
 	controller.select_slot(tank.slot)
 	controller.select_target(primary.id)
+	if natural_attacks:
+		controller.player_right_click(primary.pos, primary.id)
 	var primary_before := primary.hp
 	var companion_before := companion.hp
 	var opened := controller.submit_player_skill("e", Vector2.ZERO, false)
@@ -533,9 +953,17 @@ func _player_whirlwind_case(primary_index: int, natural_attacks: bool) -> void:
 				first_ot = "第%d发前 t=%.2f 主怪目标=%d 旁怪目标=%d 主怪仇恨=%s" % [index + 1, sim.time, primary.target_id, companion.target_id, primary.threat]
 		controller.select_slot(mage.slot)
 		controller.select_target(primary.id)
+		if natural_attacks and index == 0:
+			controller.player_right_click(primary.pos, primary.id)
 		var mage_before := float(primary.threat.get(mage.id, 0.0))
 		var hp_before := primary.hp
 		var cast := controller.submit_player_skill(key, Vector2.ZERO, false)
+		# W 的读条与飞行均可跨多步，技能伤害断言采样在实际命中之后。
+		if key == "w":
+			for step in 40:
+				if mage.cast.is_empty() and sim._player_projectiles.is_empty():
+					break
+				sim.step(0.05)
 		var mage_after := float(primary.threat.get(mage.id, 0.0))
 		var damage := hp_before - primary.hp
 		sim.step(0.05)
@@ -545,7 +973,7 @@ func _player_whirlwind_case(primary_index: int, natural_attacks: bool) -> void:
 		var detail := "t=%.2f 主怪目标=%d 战士=%.2f 法师=%.2f 旁怪目标=%d" % [sim.time, primary.target_id,
 			float(primary.threat.get(tank.id, 0.0)), float(primary.threat.get(mage.id, 0.0)), companion.target_id]
 		_check(label + " 第%d发%s" % [index + 1, key.to_upper()], cast and damage > 0.0
-			and is_equal_approx(mage_after - mage_before, damage)
+			and (natural_attacks or is_equal_approx(mage_after - mage_before, damage))
 			and (natural_attacks or held), detail)
 		if index == 0:
 			tank.hp -= 100.0

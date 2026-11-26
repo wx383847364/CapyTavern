@@ -148,16 +148,29 @@ func talent_of(class_id: String) -> String:
 	return str((service.state["talentId"] as Dictionary).get(class_id, SaveService.DEFAULT_TALENT))
 
 
-## 成员详情：面板数值 + 技能最终参数（已含当前天赋和两件套）。
+## 成员详情按选定专精提供普攻和技能；原有职业继续显示天赋、套装修正。
 func member_view(class_id: String) -> Dictionary:
 	var card := class_card(class_id)
 	var status := set_status(class_id)
 	card["talent"] = talent_of(class_id)
 	card["set"] = status
 	card["skills"] = _skill_lines(_config_for(class_id, talent_of(class_id), bool(status["active"])), class_id)
+	if class_id == "mage" and service.mage_spec() == "mage.frost":
+		var attack: Dictionary = _base["classes"][class_id]["attack"].duplicate()
+		attack["damage"] = _base["classes"][class_id]["frost"]["attack_damage"]
+		card["attack"] = _attack_text(attack)
 	card["captain"] = captain_class() == class_id
 	card["slot"] = service.slot_of(class_id)
 	return card
+
+
+## 寒霜技能与战斗共用配表，整备和锁定名单按同一槽位读取。
+func frost_skill_names() -> Array[String]:
+	var names: Array[String] = []
+	var slots: Dictionary = _base["classes"]["mage"]["frost"]["skills"]
+	for key: String in ["q", "w", "e", "r"]:
+		names.append("%s %s" % [key.to_upper(), _base["skills"][slots[key]]["name"]])
+	return names
 
 
 # ── 装备 ──

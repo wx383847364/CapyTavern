@@ -6,12 +6,18 @@ extends RefCounted
 const BalanceLoader := preload("res://scripts/data/balance_loader.gd")
 
 
-## 保留旧 balance JSON 配置入口；五技能使用显式的独立目录加载。
+const MAGE_FROST := "mage.frost"
+
+
+## 从统一配表加载战斗。寒霜只替换本场法师的技能和普攻，其他槽沿用原方式。
 static func load_config(options: Dictionary = {}) -> Dictionary:
-	return BalanceLoader.load_balance(options)
+	var config := BalanceLoader.load_balance(options)
+	if not config.is_empty() and options.get("mage_spec") == MAGE_FROST:
+		config["mage_spec"] = MAGE_FROST
+	return config
 
 
-## 校验必要字段，返回问题列表；空表示可用。
+## 校验本场所需字段和已选专精；空表示可用。
 static func validate(config: Dictionary) -> PackedStringArray:
 	var problems := PackedStringArray()
 	for key in ["tick", "time_limit", "gcd", "classes", "skills", "enemies", "wave", "party_scaling", "arena", "ally_spawn", "defense_formula"]:
@@ -29,9 +35,11 @@ static func validate(config: Dictionary) -> PackedStringArray:
 		var skill: Dictionary = config["skills"][skill_id]
 		if not _valid_auto_use(skill.get("auto_use", {})):
 			problems.append("%s.auto_use: 无效的自动施放规则" % skill_id)
+		_check_projectile_timing(skill, skill_id, problems)
 	for entry in config["wave"]:
 		if not config["enemies"].has(entry.get("enemy", "")):
 			problems.append("wave 里有未定义的敌人 %s" % entry.get("enemy", ""))
+	problems.append_array(frost_config_problems(config))
 	return problems
 
 
@@ -58,18 +66,62 @@ const LOADOUT_PATHS := [
 ]
 
 
-## 只识别裁决中的正式阵容，专精数组保留原四槽及空位。
-static func formal_specs(slots: Array) -> Array:
+## 正式阵容沿用原范围，法师技能按本场锁定的专精选择。
+static func formal_specs(slots: Array, mage_spec: String = "mage.fire") -> Array:
 	if slots.size() != 4 or slots.count("mage") != 1 or slots.count("priest") > 1:
 		return []
 	var specs: Array = []
 	for class_id: Variant in slots:
 		match class_id:
 			"": specs.append("")
-			"mage": specs.append("mage.fire")
+			"mage": specs.append(mage_spec)
 			"priest": specs.append("priest.holy")
 			_: return []
 	return specs
+
+
+## 两条出征路径共用寒霜配表校验；缺少技能或字段时在酒馆保留可重试的加载错误。
+static func frost_config_problems(config: Dictionary) -> PackedStringArray:
+	var problems := PackedStringArray()
+	if config.get("mage_spec") != MAGE_FROST:
+		return problems
+	var frost: Variant = config.get("classes", {}).get("mage", {}).get("frost")
+	if not frost is Dictionary or not frost.get("skills") is Dictionary:
+		return PackedStringArray([MAGE_FROST + ": 缺少职业配置或技能槽"])
+	for field: String in ["attack_damage", "power"]:
+		_check_number(frost, field, MAGE_FROST, problems)
+	var slots: Dictionary = frost.get("skills", {})
+	var effects := {"q": "damage", "w": "freeze", "e": "blink", "r": "ice_block"}
+	var targets := {"q": "enemy", "w": "self", "e": "direction", "r": "self"}
+	for key: String in effects:
+		var id: String = slots.get(key, "")
+		var skill: Dictionary = config.get("skills", {}).get(id, {})
+		var rows: Variant = skill.get("effects")
+		if not id.begins_with(MAGE_FROST + ".") or skill.get("target") != targets[key] or not skill.get("name") is String \
+				or not rows is Array or rows.size() != 1 or not rows[0] is Dictionary or rows[0].get("kind") != effects[key]:
+			problems.append("%s.%s: 寒霜技能或效果缺失" % [MAGE_FROST, key])
+			continue
+		for field: String in ["range", "cost", "cooldown"]:
+			_check_number(skill, field, id, problems)
+		if key in ["q", "w"]:
+			for field: String in ["amount", "power_coeff"]:
+				_check_number(rows[0], field, id, problems)
+		if key == "q":
+			_check_projectile_timing(skill, id, problems)
+			if skill.get("cast_time_s", 0.0) == 0.0 or skill.get("projectile_speed_mps", 0.0) == 0.0:
+				problems.append("%s: 寒冰箭须配置读条和弹道" % id)
+		elif key == "w":
+			for field: String in ["radius", "duration"]:
+				_check_number(rows[0], field, id, problems)
+		elif key == "r":
+			for field: String in ["duration", "tick", "mana_fraction", "health_fraction"]:
+				_check_number(rows[0], field, id, problems)
+			var tick: Variant = rows[0].get("tick")
+			var duration: Variant = rows[0].get("duration")
+			if _nonnegative_number(tick) and _nonnegative_number(duration):
+				if tick <= 0.0 or duration < tick or not is_equal_approx(float(duration) / float(tick), roundf(float(duration) / float(tick))):
+					problems.append("%s: 恢复间隔必须能等分持续时间" % id)
+	return problems
 
 
 ## 检查正式初始化所用的数值源。缺失字段不得落到旧出生默认值或先建立战斗。
@@ -236,6 +288,7 @@ static func validate_resolved_skill(data: Dictionary) -> PackedStringArray:
 		problems.append("%s.icon: 缺失或类型错误；允许显式 null 占位" % id)
 	for field in ["cast_range_m", "mana_cost", "cooldown_s"]:
 		_check_number(data, field, id, problems)
+	_check_projectile_timing(data, id, problems)
 	if not _valid_auto_use(data.get("auto_use", {})):
 		problems.append("%s.auto_use: 无效的自动施放规则" % id)
 	var target: Variant = data.get("target_kind")
@@ -330,6 +383,17 @@ static func _check_number(data: Dictionary, field: String, id: String, problems:
 		problems.append("%s.%s: 缺失、非有限或负数" % [id, field])
 
 
+## 仅允许已接入的单体弹道技能配置正读条时间与速度，缺省零保持瞬发。
+static func _check_projectile_timing(skill: Dictionary, id: String, problems: PackedStringArray) -> void:
+	var duration: Variant = skill.get("cast_time_s", 0.0)
+	var speed: Variant = skill.get("projectile_speed_mps", 0.0)
+	if not _nonnegative_number(duration) or not _nonnegative_number(speed):
+		problems.append("%s.cast_time_s/projectile_speed_mps: 须为有限非负数" % id)
+	elif duration != 0.0 or speed != 0.0:
+		if id not in ["arcane_bolt", "mage.fire.fireball", "mage.frost.frostbolt"] or duration == 0.0 or speed == 0.0:
+			problems.append("%s.cast_time_s/projectile_speed_mps: 弹道读条须配置受支持的技能与正数" % id)
+
+
 ## 从有类型的 Resource 提取参数；未显式声明的可空/布尔字段保留为错误状态。
 static func _skill_data(source: SkillDef) -> Dictionary:
 	var data := {
@@ -339,6 +403,9 @@ static func _skill_data(source: SkillDef) -> Dictionary:
 	}
 	if not source.auto_use.is_empty():
 		data["auto_use"] = source.auto_use.duplicate(true)
+	if source.cast_time_s != 0.0 or source.projectile_speed_mps != 0.0:
+		data["cast_time_s"] = source.cast_time_s
+		data["projectile_speed_mps"] = source.projectile_speed_mps
 	if source.icon_declared:
 		data["icon"] = source.icon
 	for source_effect in source.effects:

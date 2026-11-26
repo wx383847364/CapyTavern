@@ -13,11 +13,11 @@ func setup(tavern_sim: TavernSim) -> void:
 	sim = tavern_sim
 
 
-## 左键。面板打开时场景不处理（由逻辑层拒绝并记日志）；点队长自己什么都不做；先判对象再判地面。
-func on_left_click(pos: Vector2) -> Dictionary:
+## 左键先尊重面板限制；命中队长可见本体或脚下范围时忽略，随后判断对象和地面。
+func on_left_click(pos: Vector2, captain_body_hit: bool = false) -> Dictionary:
 	if sim.panel != "":
 		return sim.click_ground(pos)
-	if sim.captain_at(pos):
+	if captain_body_hit or sim.captain_at(pos):
 		return {"ok": true, "reason": "", "ignored": true}
 	var object_id := sim.object_at(pos)
 	if object_id != "":

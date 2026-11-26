@@ -140,7 +140,7 @@ func _show_return_notice() -> void:
 	_toast_text(text, 7000)
 
 
-## 确认出征成功（已保存最新配置）：锁定名单、记事件，再加载战斗。
+## 确认出征成功后锁定名单和法师专精，再加载战斗。
 func _on_sortie_confirmed(_roster_list: Array) -> void:
 	if _loading:
 		return
@@ -153,9 +153,10 @@ func _on_sortie_confirmed(_roster_list: Array) -> void:
 		"captain_slot": slot,
 		"talents": options["talents"],
 		"sets": options["sets"],
+		"mage_spec": options["mage_spec"],
 	}
 	_formal_lock = {}
-	var specs := BattleConfig.formal_specs(SortieSession.locked["slots"])
+	var specs := BattleConfig.formal_specs(SortieSession.locked["slots"], options["mage_spec"])
 	if not specs.is_empty():
 		_formal_lock = SortieSession.locked.duplicate(true)
 		_formal_lock["specs"] = specs
@@ -184,6 +185,7 @@ func _load_battle() -> void:
 	BattleLaunch.slots = SortieSession.locked["slots"]
 	BattleLaunch.talents = SortieSession.locked["talents"]
 	BattleLaunch.sets = SortieSession.locked["sets"]
+	BattleLaunch.mage_spec = SortieSession.locked["mage_spec"]
 	BattleLaunch.captain_slot = int(SortieSession.locked["captain_slot"])
 	BattleLaunch.run_id = run_id
 	BattleLaunch.from_tavern = true
@@ -197,7 +199,7 @@ func _load_battle() -> void:
 	SortieSession.change_scene(get_tree(), BATTLE_SCENE)
 
 
-## 酒馆完成所有可失败的预检。正式阵容失败时留在原面板，同 run_id 可重试。
+## 按锁定的阵容与专精预检。失败时留在原面板，用同一场次重试。
 func _load_problem() -> String:
 	_formal_prepared = {}
 	if SortieSession.fail_load_left > 0:
@@ -209,9 +211,11 @@ func _load_problem() -> String:
 	var slots: Variant = locked.get("slots")
 	if not slots is Array or not locked.get("talents") is Dictionary or not locked.get("sets") is Array:
 		return "出征阵容、天赋或套装快照无效"
-	var specs := BattleConfig.formal_specs(slots)
+	var mage_spec: String = locked.get("mage_spec", "mage.fire")
+	var specs := BattleConfig.formal_specs(slots, mage_spec)
 	var formal := not specs.is_empty() or not _formal_lock.is_empty()
 	var options := {"modifiers": false} if formal else {"talents": locked["talents"], "sets": locked["sets"]}
+	options["mage_spec"] = mage_spec
 	var config := BattleConfig.load_config(options)
 	if not formal:
 		var legacy_problems := BattleConfig.validate(config)
@@ -223,6 +227,7 @@ func _load_problem() -> String:
 	if not lock_problem.is_empty():
 		return lock_problem
 	var problems := BattleConfig.formal_config_problems(config, slots)
+	problems.append_array(BattleConfig.frost_config_problems(config))
 	if not problems.is_empty():
 		return "正式战斗配置不可用：" + "; ".join(problems)
 	var catalog := BattleConfig.load_skill_catalog()
@@ -248,7 +253,7 @@ func _formal_lock_problem(specs: Array) -> String:
 		return "正式出征的专精快照无效"
 	if not _formal_lock.get("run_id") is String or _formal_lock["run_id"].is_empty() or table.slots.is_empty():
 		return "正式出征的场次或物品表无效"
-	for key: String in ["run_id", "slots", "captain", "captain_slot", "talents", "sets"]:
+	for key: String in ["run_id", "slots", "captain", "captain_slot", "talents", "sets", "mage_spec"]:
 		if _formal_lock.get(key) != locked.get(key):
 			return "正式出征快照不一致：" + key
 	var slot: Variant = _formal_lock.get("captain_slot")
@@ -356,16 +361,16 @@ func _event_pos(event: InputEvent) -> Vector2:
 	return Vector2(-1.0, -1.0)
 
 
-## 界面控件（常驻栏、面板、面板后的遮罩）在场景之前接住点击，能走到这里的都是场景上的点击。
+## 界面先消费点击；场景把可见的队长本体命中交给控制器，与脚下命中一并判断。
 func _on_left_click(pos: Vector2) -> void:
-	_show_result(controller.on_left_click(pos))
+	_show_result(controller.on_left_click(pos, bool(_view.call("captain_body_at", pos))))
 
 
-## 记录真实请求及面板响应；正式阵容的短提示仅补充面板内常驻说明。
+## 记录面板请求和实际响应，正式阵容提示使用当前专精。
 func _on_open_requested(kind: String) -> void:
 	TavernEvents.diagnostic("ui_open_requested", {"kind": kind})
 	sim.open_panel(kind)
-	var specs := BattleConfig.formal_specs(service.battle_slots()) if kind in ["prepare", "sortie"] else []
+	var specs := BattleConfig.formal_specs(service.battle_slots(), service.mage_spec()) if kind in ["prepare", "sortie"] else []
 	if specs.is_empty():
 		_refresh_view()
 	else:

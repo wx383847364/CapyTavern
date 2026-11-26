@@ -406,7 +406,7 @@ func _recruit(class_id: String) -> void:
 
 # ── 整备面板 ──
 
-## 整备按实际出征槽位识别正式专精，切换查看职业时重新取该槽的说明。
+## 整备按出征槽位显示实际技能。法师可在此切换专精，混编队也能装备寒霜。
 func _build_prepare() -> void:
 	if roster.party_count() == 0:
 		_label(_body, "还没有队员，先去招募第一名队员。", 24, Color(1, 0.9, 0.6))
@@ -414,8 +414,9 @@ func _build_prepare() -> void:
 		return
 	if _target == "" or not roster.service.is_recruited(_target):
 		_target = roster.inspected_class()
-	var specs := BattleConfig.formal_specs(roster.service.battle_slots())
-	var spec_id := String(specs[roster.service.slot_of(_target)]) if not specs.is_empty() else ""
+	var mage_spec := roster.service.mage_spec()
+	var specs := BattleConfig.formal_specs(roster.service.battle_slots(), mage_spec)
+	var spec_id := _display_spec(specs, roster.service.slot_of(_target), _target, mage_spec)
 	_build_prepare_heads()
 	var cols := _hbox(_body, "prepare_cols")
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -459,7 +460,7 @@ func _view_member(class_id: String) -> void:
 	_dirty = true
 
 
-## 保留当前套装件数；正式出征在原技能区显示实际四槽和该职业套装的适用范围。
+## 在原技能区显示实际四槽与套装适用范围，法师在此保存专精。
 func _build_member_column(col: VBoxContainer, spec_id: String) -> void:
 	var view := roster.member_view(_target)
 	_label(col, "%s%s" % [String(view["name"]), "（队长）" if bool(view["captain"]) else ""], 28, roster.class_color(_target).lerp(Color.WHITE, 0.4))
@@ -467,7 +468,15 @@ func _build_member_column(col: VBoxContainer, spec_id: String) -> void:
 	_label(col, "资源：%s　%s" % [String(view["resource"]), String(view["attack"])], 17, DIM)
 	var status: Dictionary = view["set"]
 	_label(col, "套装：%s" % String(status["text"]), 18, GOOD if bool(status["active"]) else DIM).name = "set_status"
-	if not spec_id.is_empty():
+	if _target == "mage":
+		var picks := _hbox(col, "mage_specializations")
+		var frost := spec_id == BattleConfig.MAGE_FROST
+		# 两个按钮都走现有的保存失败重试流程。
+		_button(picks, "烈焰", _pick_mage_spec.bind("mage.fire", "烈焰"), "mage_spec_fire", not frost)
+		_button(picks, "寒霜", _pick_mage_spec.bind(BattleConfig.MAGE_FROST, "寒霜"), "mage_spec_frost", frost)
+	if spec_id == BattleConfig.MAGE_FROST:
+		_label(col, "法师两件套技能加成适用于烈焰", 17, DIM)
+	elif not spec_id.is_empty():
 		var amount := "原始治疗量" if _target == "priest" else "原始伤害"
 		_label(col, "两件套仅使本职业 Q 的%s +5%%" % amount, 17, DIM).name = "formal_set_rule"
 	var target := _target
@@ -482,8 +491,22 @@ func _build_member_column(col: VBoxContainer, spec_id: String) -> void:
 		_label(col, "[%s] %s\n    %s" % [skill["key"], skill["name"], skill["text"]], 17)
 
 
-## 从正式专精资源读取名称和空槽；读取失败时明确提示，避免回落到旧技能。
+## 切换专精并按保存结果刷新整备；失败时保留原按钮状态。
+func _pick_mage_spec(spec_id: String, label: String) -> void:
+	_run(roster.service.set_mage_spec.bind(spec_id), "法师已切换为%s" % label)
+
+
+## 混编阵容沿用原技能显示，寒霜法师仍显示本次锁定的专精技能。
+func _display_spec(specs: Array, slot: int, class_id: String, mage_spec: String) -> String:
+	if not specs.is_empty():
+		return String(specs[slot])
+	return mage_spec if class_id == "mage" and mage_spec == BattleConfig.MAGE_FROST else ""
+
+
+## 从战斗配表或正式资源读取槽位名称，读取正式资源失败时明确提示。
 func _formal_skill_text(spec_id: String, separator: String = "　") -> String:
+	if spec_id == BattleConfig.MAGE_FROST:
+		return separator.join(roster.frost_skill_names())
 	var resolved := BattleConfig.resolve_spec(BattleConfig.load_skill_catalog(), spec_id)
 	if not resolved["problems"].is_empty():
 		return "正式专精技能暂不可用"
@@ -570,24 +593,25 @@ func _pick_talent(talent: String) -> void:
 
 # ── 出征面板 ──
 
-## 加载与重试时用已锁定阵容，确认前用实时四槽；领奖页沿用原内容。
+## 加载和重试使用出征锁定的阵容与专精，确认前显示实时整备状态。
 func _build_sortie() -> void:
 	if _sortie_mode == "reward":
 		_build_reward()
 		return
 	var locked := _sortie_mode == "locked"
 	var slots: Array = SortieSession.locked.get("slots", []) if locked else roster.service.battle_slots()
-	var specs := BattleConfig.formal_specs(slots)
-	if not specs.is_empty():
+	var mage_spec := String(SortieSession.locked.get("mage_spec", "mage.fire")) if locked else roster.service.mage_spec()
+	var specs := BattleConfig.formal_specs(slots, mage_spec)
+	if not specs.is_empty() and mage_spec != BattleConfig.MAGE_FROST:
 		_label(_body, "%s；%s" % [FORMAL_TALENT_TEXT, FORMAL_SET_TEXT], 18, DIM).name = "formal_sortie_rules"
 	if locked:
-		_build_locked(specs)
+		_build_locked(specs, mage_spec)
 	else:
-		_build_sortie_main(specs)
+		_build_sortie_main(specs, mage_spec)
 
 
-## 正式阵容在各自出战行下展示实际技能，不改变前置检查和整备入口。
-func _build_sortie_main(specs: Array) -> void:
+## 在出战行展示正式专精或寒霜的技能，便于确认出征前核对。
+func _build_sortie_main(specs: Array, mage_spec: String) -> void:
 	var view := roster.sortie_view()
 	var stage: Dictionary = view["stage"]
 	var cols := _hbox(_body, "sortie_cols")
@@ -617,8 +641,8 @@ func _build_sortie_main(specs: Array) -> void:
 		var info := _label(row, text, 20, BAD if bool(entry["flagged"]) else Color.WHITE)
 		info.custom_minimum_size = Vector2(470, 0)
 		_button(row, "整备", func() -> void: _open_prepare_for(class_id, "sortie"), "sortie_prepare_%d" % int(entry["number"]))
-		if not specs.is_empty():
-			var spec_id := String(specs[int(entry["slot"])])
+		var spec_id := _display_spec(specs, int(entry["slot"]), class_id, mage_spec)
+		if not spec_id.is_empty():
 			_label(right, _formal_skill_text(spec_id), 17, DIM).name = "formal_sortie_skills_%d" % int(entry["number"])
 	_label(right, String(view["hint"]), 16, DIM)
 	_label(_body, String(view["summary"]), 22, GOOD if bool(view["ok"]) else Color(1, 0.9, 0.6)).name = "sortie_summary"
@@ -651,14 +675,14 @@ func _confirm_sortie() -> void:
 		sortie_confirmed.emit(_locked_roster))
 
 
-## 加载失败留在已锁定名单，正式技能说明继续对应锁定时的槽位。
-func _build_locked(specs: Array) -> void:
+## 加载失败留在已锁定名单，技能说明使用锁定时的槽位和专精。
+func _build_locked(specs: Array, mage_spec: String) -> void:
 	_label(_body, "前置检查通过，最新配置已保存", 28, GOOD).name = "locked_title"
 	_label(_body, "已锁定的出战名单（按战斗快捷键 1–4 顺序）：", 20, DIM)
 	for entry: Dictionary in _locked_roster:
 		_label(_body, "%d  %s%s　%s　天赋 %s" % [entry["slot"], entry["name"], " ★队长" if bool(entry["captain"]) else "", entry["set_text"], entry["talent"]], 22)
-		if not specs.is_empty():
-			var spec_id := String(specs[int(entry["slot"]) - 1])
+		var spec_id := _display_spec(specs, int(entry["slot"]) - 1, entry["class_id"], mage_spec)
+		if not spec_id.is_empty():
 			_label(_body, _formal_skill_text(spec_id), 17, DIM).name = "formal_sortie_skills_%d" % int(entry["slot"])
 	if _load_state == "loading":
 		_label(_body, "正在前往 %s …" % String(roster.stage_view()["name"]), 26, Color(1, 0.9, 0.6)).name = "loading_text"

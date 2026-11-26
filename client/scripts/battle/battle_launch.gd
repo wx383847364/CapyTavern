@@ -16,6 +16,8 @@ static var fast: bool = false
 static var talents: Dictionary = {}
 ## 已凑齐两件套的职业 id 列表。P2b 接装备后由穿戴算出。
 static var sets: Array = []
+## 本场从酒馆锁定的法师专精，调试入口忽略。
+static var mage_spec: String = "mage.fire"
 
 
 ## 出征衔接（P4）：从酒馆确认出征进来时为 true；战斗结束写结算并回酒馆。

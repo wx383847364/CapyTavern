@@ -12,12 +12,13 @@ static func enemy_target(sim: Variant, id: int) -> Variant:
 	return unit if unit != null and unit.alive and unit.selectable and unit.side == "enemy" else null
 
 
-## 自动动作读取本场槽位，跳过手动专用或尚未实现的技能；选择能立即施放的最高优先技能。
+## 自动动作按当前角色的技能配置选招，寒霜只有寒冰箭允许自动施放。
 static func choose_skill(sim: Variant, actor: Variant, target: Variant, allies: Array, enemies: Array) -> Dictionary:
 	var cast := {}
 	var approach := {}
-	var slots: Dictionary = actor.resolved_slots if sim.formal_skill_sortie else actor.skills
-	var scale: float = sim.SCENE_UNITS_PER_METER if sim.formal_skill_sortie else 1.0
+	var from_resource: bool = sim.formal_skill_sortie and actor.spec_id != "mage.frost"
+	var slots: Dictionary = actor.resolved_slots if from_resource else actor.skills
+	var scale: float = sim.SCENE_UNITS_PER_METER if from_resource else 1.0
 	for slot in SLOTS:
 		var skill: Dictionary = slots.get(slot, {})
 		var rule: Dictionary = skill.get("auto_use", {})

@@ -11,6 +11,7 @@ extends RefCounted
 ##   ownedItems      已拥有物品 id（含穿着的、换下的、领到的）
 ##   equips          {class_id: {slot: item_id}}，每件必须在 ownedItems 里
 ##   talentId        {class_id: "t1"|"t2"}
+##   mageSpec        可选字段 "mage.frost"；缺省为原有技能配置
 ##   pendingReward   null 或 {"run_id": 场次}，非空时不能再出征
 ##   claimedRuns     已领过奖的场次
 ## 不进存档：酒馆坐标、战斗中的生命、资源、冷却、仇恨、临时增益。
@@ -73,6 +74,7 @@ func load_state() -> void:
 	state = _normalize(data)
 
 
+## 修复和兼容读档字段；只有已招募的法师保留显式选择的寒霜。
 func _normalize(data: Dictionary) -> Dictionary:
 	var out := empty_state()
 	# 槽位：只认表里的职业，重复的后者丢弃
@@ -139,6 +141,9 @@ func _normalize(data: Dictionary) -> Dictionary:
 		if resolved != wanted_talent:
 			notes.append("%s 的天赋标识 %s 不合法，已回默认 %s" % [class_id, wanted_talent, DEFAULT_TALENT])
 		(out["talentId"] as Dictionary)[class_id] = resolved
+
+	if "mage" in members and data.get("mageSpec") == "mage.frost":
+		out["mageSpec"] = "mage.frost"
 
 	# 三个槽位指针：必须指向有人的槽
 	out["captainSlot"] = _pointer(data.get("captainSlot"), out["slots"], true)
@@ -254,9 +259,28 @@ func active_sets() -> Array[String]:
 	return out
 
 
-## 给 BalanceLoader / 战斗用的参数。
+## 旧档和未选择寒霜的法师继续使用原本随阵容确定的技能。
+func mage_spec() -> String:
+	return String(state.get("mageSpec", "mage.fire"))
+
+
+## 沿用存档的原子写入；恢复烈焰时删除可选字段，失败保留上一次选择。
+func set_mage_spec(spec: String) -> Dictionary:
+	if not is_recruited("mage"):
+		return _fail("not_recruited")
+	if spec not in ["mage.fire", "mage.frost"]:
+		return _fail("invalid_spec")
+	var draft := state.duplicate(true)
+	if spec == "mage.frost":
+		draft["mageSpec"] = spec
+	else:
+		draft.erase("mageSpec")
+	return _commit(draft)
+
+
+## 返回出征时一并锁定的天赋、套装和法师专精。
 func battle_options() -> Dictionary:
-	return {"talents": (state["talentId"] as Dictionary).duplicate(), "sets": active_sets()}
+	return {"talents": (state["talentId"] as Dictionary).duplicate(), "sets": active_sets(), "mage_spec": mage_spec()}
 
 
 ## 战斗槽位：长度 4 的职业 id 列表。party 为空表示全部已招募成员出战；

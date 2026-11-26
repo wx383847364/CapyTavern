@@ -24,5 +24,7 @@ target_kind = "ENEMY"
 cast_range_m = 8
 mana_cost = 15
 cooldown_s = 3
+cast_time_s = 1.2
+projectile_speed_mps = 20.0
 auto_use = {"condition": "ready", "priority": 40}
 effects = Array[ExtResource("2_effect")]([SubResource("Effect_1")])

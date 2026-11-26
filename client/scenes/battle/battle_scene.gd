@@ -53,7 +53,7 @@ var _aim_from_button: bool = false
 var _pointer: Vector2 = Vector2.ZERO
 
 
-## 隔离实例保留非正式生命周期；酒馆正式战斗领取预检实例，再进入原日志、服务和自动战斗。
+## 酒馆正式战斗领取预检实例；其他场次从各自锁定的配置初始化。
 func _ready() -> void:
 	_skill_lifecycle_started = true
 	if _skill_validation_mode:
@@ -67,7 +67,7 @@ func _ready() -> void:
 	# 预检产物只供本次正式出征领取。默认入口和其他阵容依旧用原初始化。
 	var prepared := BattleLaunch.formal_sortie
 	BattleLaunch.formal_sortie = {}
-	var use_formal := BattleLaunch.from_tavern and (not prepared.is_empty() or not BattleConfig.formal_specs(BattleLaunch.slots).is_empty())
+	var use_formal := BattleLaunch.from_tavern and (not prepared.is_empty() or not BattleConfig.formal_specs(BattleLaunch.slots, BattleLaunch.mage_spec).is_empty())
 	if use_formal:
 		sim = prepared.get("sim") as BattleSim
 		if sim == null or not sim.formal_skill_sortie or prepared.get("run_id") != BattleLaunch.run_id or prepared.get("slots") != BattleLaunch.slots:
@@ -78,7 +78,9 @@ func _ready() -> void:
 		_config = sim.config
 		events = sim.events
 	else:
-		_config = BattleConfig.load_config({"talents": BattleLaunch.talents, "sets": BattleLaunch.sets})
+		# 调试入口不读取上一次酒馆出征的选择。
+		var mage_spec := BattleLaunch.mage_spec if BattleLaunch.from_tavern else "mage.fire"
+		_config = BattleConfig.load_config({"talents": BattleLaunch.talents, "sets": BattleLaunch.sets, "mage_spec": mage_spec})
 		var problems := BattleConfig.validate(_config)
 		if not problems.is_empty():
 			push_error("战斗配置不可用：" + "; ".join(problems))
@@ -86,7 +88,7 @@ func _ready() -> void:
 			return
 		events = BattleEvents.new()
 	if use_formal:
-		print("BALANCE_FORMAL run_id=%s specs=%s q_sets=%s legacy_modifiers=%s" % [BattleLaunch.run_id, BattleConfig.formal_specs(BattleLaunch.slots), BattleLaunch.sets, _config["applied_modifiers"]])
+		print("BALANCE_FORMAL run_id=%s specs=%s q_sets=%s legacy_modifiers=%s" % [BattleLaunch.run_id, BattleConfig.formal_specs(BattleLaunch.slots, BattleLaunch.mage_spec), BattleLaunch.sets, _config["applied_modifiers"]])
 	else:
 		print("BALANCE talents=%s sets=%s applied=%s warnings=%s" % [_config["talents"], BattleLaunch.sets, _config["applied_modifiers"], _config["warnings"]])
 	_tick = float(_config["tick"])
@@ -95,6 +97,7 @@ func _ready() -> void:
 	if not use_formal:
 		sim = BattleSim.new()
 		sim.setup(_config, BattleLaunch.slots, BattleLaunch.seed, events)
+	_pointer = get_local_mouse_position()
 	controller = BattleController.new()
 	if not controller.setup(sim, events, BattleLaunch.captain_slot if BattleLaunch.from_tavern else -1):
 		push_error("战斗输入绑定失败")
@@ -103,13 +106,16 @@ func _ready() -> void:
 	sim.player_controls = not BattleLaunch.autoplay
 	sim.ally_ai_enabled = sim.player_controls
 	if sim.player_controls:
+		if controller.selected_unit() != null:
+			sim.set_controlled_actor(controller.selected_unit().id)
 		controller.load_preferences()
 		_pointer = get_local_mouse_position()
 	if use_formal:
 		events.cast_resolved.connect(_on_formal_cast)
 		sim.publish_formal_start()
 	if sim.player_controls:
-		events.damage_dealt.connect(_on_damage_dealt)
+		events.health_effect_applied.connect(_on_health_effect_applied)
+		events.selection_changed.connect(_on_feedback_selection)
 	events.command_rejected.connect(_on_rejected)
 	events.battle_ended.connect(_on_ended)
 	if BattleLaunch.from_tavern:
@@ -159,7 +165,7 @@ func _process(delta: float) -> void:
 	_refresh_view()
 
 
-## 隔离渲染保留独立最终画面；正式专精沿用实战日志和结算界面，同时显示技能执行结果。
+## 渲染战斗快照和技能反馈，隔离验证保留独立的最终画面。
 func _refresh_view(final_frame: bool = false) -> void:
 	if _skill_validation_mode:
 		if not _skill_validation_view or _view == null or sim == null or controller == null or _leaving:
@@ -182,6 +188,14 @@ func _refresh_view(final_frame: bool = false) -> void:
 	var frame := sim.snapshot()
 	if sim.player_controls:
 		var actor := controller.selected_unit()
+		if actor != null and not actor.cast.is_empty() and _skill_result_notice == "技能已入队":
+			# 读条接替入队提示；命中或取消时再由正式结果提供反馈。
+			_skill_result_notice = ""
+			text = ""
+		if actor != null and not actor.cast_approach.is_empty():
+			if _skill_result_notice == "技能已入队":
+				_skill_result_notice = ""
+			text = "正在接近 · %s" % actor.cast_approach["name"]
 		var target := controller.target_for(actor)
 		var aim := controller.aim_view(_aim_key, _pointer, _pointer_is_ground()) if not _aim_key.is_empty() else {}
 		frame["player_hud"] = {"target": target.id if target != null else -1,
@@ -190,17 +204,27 @@ func _refresh_view(final_frame: bool = false) -> void:
 	_view.call("render", frame, controller.selected_slot, text, ProjectSettings.globalize_path(LOG_PATH))
 
 
-## 从已结算的普攻和旧技能伤害触发反馈，只接收友方对怪物的扣血。
-func _on_damage_dealt(source_id: int, target_id: int, amount: int, _skill_id: String, critical: bool, _hp_after: int) -> void:
+## 实际命中时按当前操控身份筛选个人反馈，飞弹冲击供全队观察。
+func _on_health_effect_applied(source_id: int, target_id: int, amount: float, healing: bool, critical: bool, projectile: bool) -> void:
 	if _leaving or sim.paused or sim.finished:
 		return
-	var source: BattleSim.Unit = sim.units.get(source_id)
 	var target: BattleSim.Unit = sim.units.get(target_id)
-	if source == null or source.side != "ally" or target == null or target.side != "enemy":
+	if target == null:
 		return
-	# 正式普攻的旧事件会舍入伤害，最后不足半点的扣血仍是致死命中。
-	if amount > 0 or (amount == 0 and target.alive and target.hp == 0.0):
+	if projectile:
+		_view.call("show_projectile_impact", target.pos)
+	if source_id != sim.controlled_actor_id:
+		return
+	_view.call("show_combat_number", target_id, target.pos, target.radius, amount, healing, critical)
+	if not healing and target.side == "enemy":
 		_view.call("show_enemy_hit", target_id, critical)
+
+
+## 切人清理个人闪白与飘字，场上飞弹继续显示。
+func _on_feedback_selection(_slot: int) -> void:
+	_skill_result_notice = ""
+	_toast = ""
+	_view.call("clear_enemy_hits")
 
 
 ## 新的正式普通命令拒绝取代上次技能提示；旧战斗和隔离继续使用原反馈。
@@ -224,7 +248,7 @@ func _on_ended(result: String, reason: String, elapsed: float) -> void:
 		_refresh_view(true)
 		_close_skill_validation()
 		return
-	_view.call("clear_enemy_hits")
+	_view.call("clear_enemy_hits", true)
 	_cancel_aim()
 	_settings_open = false
 	_result = result
@@ -335,7 +359,7 @@ func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 			_submit_skill(String(hit["key"]))
 
 
-## 实战输入先经过设置与瞄准状态，再把角色切换和施法交还控制器。
+## 实战输入先处理设置与瞄准；Esc 可撤回当前角色待执行的接近。
 func _player_input(event: InputEvent) -> void:
 	if event is InputEventMouse:
 		_pointer = _event_pos(event)
@@ -346,6 +370,8 @@ func _player_input(event: InputEvent) -> void:
 	if not (event is InputEventKey or event is InputEventAction):
 		return
 	if event.is_action_pressed("cancel_layer"):
+		if not _settings_open and _aim_key.is_empty():
+			controller.cancel_skill_approach()
 		_settings_open = false
 		_cancel_aim()
 	elif _settings_open:
@@ -446,7 +472,7 @@ func _player_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 				_player_cast(key)
 
 
-## 正式结果仍由事件确认；旧地面范围技能通过本次实际统计变化提示空放。
+## 正式结果由事件确认；旧版爆破依据实际命中提示，方向技能独立处理。
 func _player_cast(key: String) -> void:
 	var actor := controller.selected_unit()
 	if sim.paused:
@@ -462,7 +488,7 @@ func _player_cast(key: String) -> void:
 		_skill_result_notice = "技能已入队" if queued else "输入拒绝：" + String(_view.call("reason_text", controller.last_input.get("reason", "无角色")))
 	elif not queued and actor != null:
 		_on_rejected(actor.id, "skill", controller.last_input.get("reason", "no_target"))
-	elif aim.get("ground", false) and actor != null and actor.damage_done == before:
+	elif aim.get("ground", false) and not aim.get("direction", false) and actor != null and actor.damage_done == before:
 		_toast = "烈焰爆破：未命中"
 		_toast_until_ms = Time.get_ticks_msec() + 1500
 
@@ -497,10 +523,12 @@ func _notification(what: int) -> void:
 		_cancel_aim()
 		sim.set_paused(true)
 	elif what == NOTIFICATION_EXIT_TREE and sim != null:
-		if events.damage_dealt.is_connected(_on_damage_dealt):
-			events.damage_dealt.disconnect(_on_damage_dealt)
+		if events.health_effect_applied.is_connected(_on_health_effect_applied):
+			events.health_effect_applied.disconnect(_on_health_effect_applied)
+		if events.selection_changed.is_connected(_on_feedback_selection):
+			events.selection_changed.disconnect(_on_feedback_selection)
 		if is_instance_valid(_view):
-			_view.call("clear_enemy_hits")
+			_view.call("clear_enemy_hits", true)
 		if sim.formal_skill_sortie:
 			# 正式场额外解绑事务，清理盾、关系和排队请求。
 			if events.cast_resolved.is_connected(_on_formal_cast):
@@ -632,7 +660,7 @@ func _on_validation_cast(resolved: Dictionary) -> void:
 	_refresh_view()
 
 
-## 正式场显示本场事务结果，并按实际扣血目标播放命中反馈。
+## 存下本场手动事务结果，仅显示当前角色的技能反馈。
 func _on_formal_cast(resolved: Dictionary) -> void:
 	if _leaving or resolved.get("battle_id") != sim.skill_battle_id:
 		return
@@ -641,19 +669,15 @@ func _on_formal_cast(resolved: Dictionary) -> void:
 			_view.call("set_notice", "战斗配置异常，本次未结算")
 		return
 	last_cast_result = resolved.duplicate(true)
-	_skill_result_notice = _full_skill_result_text(resolved)
-	_toast = ""
-	if sim.player_controls and resolved.get("accepted", false):
-		# 正式技能用期望暴击倍率，没有单次暴击标记；每个正伤害明细只触发闪白。
-		for effect: Dictionary in resolved["details"].get("effects", []):
-			if effect["effect_kind"] == "MAGIC_DAMAGE" and effect["actual_amount"] > 0.0:
-				_view.call("show_enemy_hit", effect["target_id"], false)
+	if not sim.player_controls or resolved.get("caster_id") == sim.controlled_actor_id:
+		_skill_result_notice = _full_skill_result_text(resolved)
+		_toast = ""
 	if resolved.get("reason") == "CONFIG_ERROR" and sim.result == "error":
 		_view.call("set_notice", "战斗配置异常，本次未结算")
 	_refresh_view()
 
 
-## 按事件身份标记原施法者和技能，使用实际明细组织提示，保留事件中的原始值。
+## 按事件身份显示原施法者、装备技能和实际结果，包括寒霜的控制与位移。
 func _full_skill_result_text(resolved: Dictionary) -> String:
 	var caster: BattleSim.Unit = sim.units.get(resolved["caster_id"])
 	var skill_id: String = resolved["skill_id"]
@@ -661,8 +685,9 @@ func _full_skill_result_text(resolved: Dictionary) -> String:
 	var caster_name := "角色 %d" % resolved["caster_id"]
 	if caster != null:
 		caster_name = caster.display_name
-		for skill: Variant in caster.resolved_slots.values():
-			if skill is Dictionary and skill.get("skill_id") == skill_id and skill.get("name") is String:
+		var slots := caster.skills if caster.spec_id == BattleConfig.MAGE_FROST else caster.resolved_slots
+		for skill: Variant in slots.values():
+			if skill is Dictionary and skill.get("skill_id", skill.get("id")) == skill_id and skill.get("name") is String:
 				skill_name = skill["name"]
 				break
 	var subject := "%s·%s" % [caster_name, skill_name]
@@ -675,6 +700,18 @@ func _full_skill_result_text(resolved: Dictionary) -> String:
 		elif details.has("seconds"):
 			explanation += "，剩余 %s 秒" % BattleViewScript.skill_amount_text(float(details["seconds"]), true)
 		return "执行拒绝：%s，%s" % [subject, explanation]
+	if skill_id.begins_with("mage.frost."):
+		var frost_outcome := ""
+		match skill_id:
+			"mage.frost.frostbolt":
+				frost_outcome = "有效伤害 %s" % BattleViewScript.skill_amount_text(float(details["damage"]))
+			"mage.frost.frost_nova":
+				frost_outcome = "冻结 %d 只小怪，有效伤害 %s" % [details["frozen"], BattleViewScript.skill_amount_text(float(details["damage"]))]
+			"mage.frost.blink":
+				frost_outcome = "移动 %s 米" % BattleViewScript.skill_amount_text(float(details["distance_m"]), true)
+			"mage.frost.ice_block":
+				frost_outcome = "开始免疫伤害并回复生命与法力"
+		return "%s，%s" % [subject, frost_outcome]
 	# 先分别汇总真实效果；先舍入单个目标会改变爆破总量。零收益仍是成功。
 	var effects: Array = details["effects"]
 	var actual := 0.0

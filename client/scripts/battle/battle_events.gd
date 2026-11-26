@@ -16,6 +16,8 @@ signal ai_skill_cast(unit_id, skill_id, target_id)
 signal ai_evade(unit_id, active)
 signal damage_dealt(source_id, target_id, amount, skill_id, is_crit, hp_after)
 signal heal_done(source_id, target_id, amount, effective, skill_id, hp_after)
+## 表现专用的实际生命变化，保留浮点实得，沿用原战斗日志格式。
+signal health_effect_applied(source_id, target_id, actual, healing, critical, projectile)
 signal resource_changed(unit_id, kind, value, max)
 signal status_applied(unit_id, status_id, source_id, until)
 signal status_expired(unit_id, status_id, source_id, until)

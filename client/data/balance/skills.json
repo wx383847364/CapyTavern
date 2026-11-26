@@ -1,6 +1,6 @@
 {
   "_status": "正式 v0.1（2026-11-06，策划交付，待测试复核；计算口径见 README.md）",
-  "_table": "表2 技能（16 行）；school 仅伤害类必填，其余不写；restore 类 cost 恒为 0",
+  "_table": "表2 技能；school 仅伤害类必填，其余不写；restore 类 cost 恒为 0",
   "skills": {
     "slam": {
       "name": "猛击",
@@ -156,6 +156,8 @@
     },
     "arcane_bolt": {
       "name": "奥术弹",
+      "cast_time_s": 1.2,
+      "projectile_speed_mps": 20,
       "auto_use": {"condition": "ready", "priority": 40},
       "cost": 20,
       "cooldown": 4,
@@ -200,6 +202,46 @@
           "amount": 60
         }
       ]
+    },
+    "mage.frost.frostbolt": {
+      "name": "寒冰箭",
+      "cast_time_s": 1.5,
+      "projectile_speed_mps": 20,
+      "auto_use": {"condition": "ready", "priority": 40},
+      "cost": 6,
+      "cooldown": 0,
+      "range": 800,
+      "target": "enemy",
+      "school": "magic",
+      "off_gcd": true,
+      "effects": [{"kind": "damage", "amount": 20, "power_coeff": 0.55}]
+    },
+    "mage.frost.frost_nova": {
+      "name": "冰霜新星",
+      "cost": 12,
+      "cooldown": 18,
+      "range": 0,
+      "target": "self",
+      "school": "magic",
+      "effects": [{"kind": "freeze", "amount": 14, "power_coeff": 0.4, "radius": 300, "duration": 2.5}]
+    },
+    "mage.frost.blink": {
+      "name": "闪现",
+      "cost": 8,
+      "cooldown": 14,
+      "range": 600,
+      "target": "direction",
+      "off_gcd": true,
+      "effects": [{"kind": "blink"}]
+    },
+    "mage.frost.ice_block": {
+      "name": "冰箱",
+      "cost": 0,
+      "cooldown": 45,
+      "range": 0,
+      "target": "self",
+      "off_gcd": true,
+      "effects": [{"kind": "ice_block", "duration": 6, "tick": 1, "mana_fraction": 1.0, "health_fraction": 0.5}]
     },
     "greater_heal": {
       "name": "强效治疗",
