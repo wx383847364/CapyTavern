@@ -4,7 +4,7 @@
   "warrior": {
     "name": "战士",
     "color": "c8553d",
-    "max_hp": 600,
+    "max_hp": 750,
     "speed": 190,
     "threat_coef": 3.0,
     "armor": 60,
@@ -12,7 +12,7 @@
     "attack": {
       "kind": "damage",
       "range": 70,
-      "damage": 20,
+      "damage": 25,
       "interval": 1.2
     },
     "resource": {
@@ -32,7 +32,7 @@
   "rogue": {
     "name": "盗贼",
     "color": "e0b341",
-    "max_hp": 380,
+    "max_hp": 475,
     "speed": 230,
     "threat_coef": 1.0,
     "armor": 20,
@@ -40,7 +40,7 @@
     "attack": {
       "kind": "damage",
       "range": 60,
-      "damage": 12,
+      "damage": 15,
       "interval": 0.7
     },
     "resource": {
@@ -60,7 +60,7 @@
   "mage": {
     "name": "法师",
     "color": "4f8fe0",
-    "max_hp": 300,
+    "max_hp": 375,
     "speed": 180,
     "threat_coef": 1.0,
     "armor": 5,
@@ -68,7 +68,7 @@
     "attack": {
       "kind": "damage",
       "range": 420,
-      "damage": 15,
+      "damage": 19,
       "interval": 1.4
     },
     "resource": {
@@ -88,7 +88,7 @@
   "priest": {
     "name": "牧师",
     "color": "e8e8e8",
-    "max_hp": 340,
+    "max_hp": 425,
     "speed": 180,
     "threat_coef": 1.0,
     "armor": 10,
@@ -96,7 +96,7 @@
     "attack": {
       "kind": "heal",
       "range": 400,
-      "damage": 16,
+      "damage": 20,
       "interval": 1.6
     },
     "resource": {
