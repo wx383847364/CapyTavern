@@ -36,7 +36,15 @@ class Unit:
 	# 命令
 	var order_kind: String = "none"
 	var order_pos: Vector2 = Vector2.ZERO
+	## 玩家选中的施法目标、持续指令对象与已计入统计的扣血分别记录。
 	var target_id: int = -1
+	var selected_target_id: int = -1
+	var auto_target_id: int = -1
+	var ai_joined: bool = false
+	var ai_personal_order: bool = false
+	var ai_contact: bool = false
+	var ai_evading: bool = false
+	var damage_done: float = 0.0
 	# 资源
 	var res_kind: String = ""
 	var res: float = 0.0
@@ -91,6 +99,16 @@ var reason: String = ""
 var units: Dictionary = {}
 var _ids: Array[int] = []
 var _next_id: int = 1
+## 真人战斗采用显式指令；自动走查和隔离夹具继续使用既有入口。
+var player_controls: bool = false
+## 只有真人出征开启队友 AI；同一模拟器的历史自检可独立构造纯规则夹具。
+const AllyAI := preload("res://scripts/battle/ally_ai.gd")
+var ally_ai_enabled: bool = false
+var _ai_open_target: int = -1
+var _ai_tank_wait: int = -1
+var _ai_aim_actor: int = -1
+var _ai_manual_cast: Dictionary = {}
+var _player_cast_seq: int = 0
 var _arena: Rect2 = Rect2()
 # 只供新准备入口的战斗身份与输入锁；旧 setup/check_cast/cast_skill 不读取。
 var skill_battle_id: String = ""
@@ -372,6 +390,7 @@ func _gate(unit_id: int, kind: String) -> Unit:
 	return unit
 
 
+## 真人走位暂停持续指令，抵达后仍能恢复。
 func order_move(unit_id: int, pos: Vector2) -> bool:
 	var unit := _gate(unit_id, "move")
 	if unit == null:
@@ -417,10 +436,308 @@ func order_heal(unit_id: int, target_id: int) -> bool:
 	return true
 
 
+## 判断地面技能落点是否在战场中，保持瞄准和结算的边界一致。
+func has_arena_point(point: Vector2) -> bool:
+	return point.is_finite() and _arena.has_point(point)
+
+
+## 过滤失效的观察目标，供技能预检和输入投影使用。
+func player_selected_target(actor: Unit) -> Unit:
+	if actor == null:
+		return null
+	var target: Unit = units.get(actor.selected_target_id)
+	return target if target != null and target.alive and target.selectable else null
+
+
+## 没有敌方目标的爆破仍可从按钮进入地面瞄准，预检用施法者脚下确认资源和计时。
+func _player_skill_projection_aim(actor: Unit, skill_id: String) -> Dictionary:
+	var target := player_selected_target(actor)
+	if skill_id in ["mage.fire.flame_burst", "fire_burst"] and (target == null or target.side != "enemy"):
+		return {"point": actor.pos}
+	return {"target": target.id if target != null else -1}
+
+
+## 仅返回当前 Q 对指定单位预计能补回的血量，沿用正式或旧版的真实计算。
+func player_heal_preview(actor: Unit, target: Unit) -> float:
+	if actor == null or target == null or not actor.alive or not target.alive or actor.attack_kind != "heal" or target.side != "ally" or target.hp >= target.max_hp or finished or paused:
+		return 0.0
+	var aim := {"target": target.id}
+	if formal_skill_sortie:
+		var skill: Dictionary = actor.resolved_slots.get("q", {})
+		var predicted := _prepare_skill_transaction({"battle_id": skill_battle_id, "caster_id": actor.id,
+			"slot": "Q", "expected_skill_id": skill.get("skill_id", ""), "aim": aim})
+		if predicted["preparable"]:
+			return float(predicted["details"]["effects"][0]["actual_amount"])
+		return 0.0
+	if not check_cast(actor.id, "q", aim)["ok"]:
+		return 0.0
+	for effect: Dictionary in actor.skills["q"]["effects"]:
+		if effect["kind"] == "heal":
+			return _effective_legacy_heal(target, roundi(float(effect["amount"])))
+	return 0.0
+
+
+## 旧治疗的真实结算与预览都使用取整后的缺血量。
+func _effective_legacy_heal(receiver: Unit, amount: int) -> int:
+	return mini(amount, int(receiver.max_hp) - int(receiver.hp))
+
+
+## 右键目标只记录持续指令，当前技能目标可再用左键独立改变。
+func issue_player_target(actor: Unit, target: Unit) -> bool:
+	if _gate(actor.id, "target") == null or not target.alive or not target.selectable:
+		return false
+	var healing := actor.attack_kind == "heal"
+	if target.side != ("ally" if healing else "enemy"):
+		return false
+	actor.auto_target_id = target.id
+	actor.order_kind = "none"
+	if ally_ai_enabled and not healing:
+		actor.ai_joined = true
+		actor.ai_personal_order = true
+		_open_ally_combat(actor, target.id)
+	events.fire(&"command_issued", [actor.id, "heal" if healing else "attack", target.id, target.pos])
+	return true
+
+
+## 按范围预选和命中结果决定是否开启普攻；同距时使用稳定单位 ID。
+func _finish_player_attack(actor: Unit, primary_id: int, center: Vector2, hits: Array[int]) -> void:
+	if not actor.alive or actor.attack_kind != "damage" or hits.is_empty():
+		return
+	if ally_ai_enabled:
+		# 首击即使已击倒目标也算开怪；后续选敌会跳过尸体。
+		var opener := primary_id if primary_id in hits else hits[0]
+		_open_ally_combat(actor, opener)
+		actor.ai_personal_order = true
+		if AllyAI.enemy_target(self, actor.auto_target_id) != null:
+			return
+	var best: Unit
+	var distance := INF
+	for id in hits:
+		var target: Unit = units.get(id)
+		if target == null or not target.alive or target.side != "enemy":
+			continue
+		var next := target.pos.distance_squared_to(center)
+		if id == primary_id:
+			best = target
+			break
+		if next < distance or (next == distance and best != null and id < best.id):
+			distance = next
+			best = target
+	if best != null:
+		actor.auto_target_id = best.id
+		actor.ai_joined = ally_ai_enabled
+
+
+## 实际生命差额直接入战斗累计，避免旧兼容事件中的取整和溢出。
+func _record_player_damage(actor: Unit, actual: float) -> void:
+	if player_controls:
+		actor.damage_done += actual
+
+
+## 真人战士在基础倍率上叠乘技能仇恨；旋风斩按每只命中怪的实际扣血建立群拉仇恨。
+func _damage_threat(actor: Unit, damage: float, skill_id: String) -> float:
+	var bonus := 1.0
+	if player_controls and actor.kind == "warrior":
+		match skill_id:
+			"slam": bonus = 1.5
+			"whirlwind": bonus = 3.5
+	return damage * actor.threat_coef * bonus
+
+
+## 真人普攻等待显式指令，牧师在优先对象不可治疗时自动支援。
+func _tick_player_ally(actor: Unit, dt: float) -> void:
+	if ally_ai_enabled:
+		_tick_ally_ai(actor, dt)
+		return
+	actor.target_id = -1
+	if actor.order_kind == "move":
+		if _move_toward(actor, actor.order_pos, dt, 3.0):
+			actor.order_kind = "none"
+		return
+	var target: Unit = units.get(actor.auto_target_id)
+	if target == null or not target.alive:
+		actor.auto_target_id = -1
+		target = null
+	if actor.attack_kind == "heal":
+		if target == null or target.hp >= target.max_hp or actor.pos.distance_to(target.pos) > actor.attack_range:
+			target = _lowest_ratio_ally(actor.pos, actor.attack_range, true)
+	if target != null and actor.pos.distance_to(target.pos) <= actor.attack_range:
+		actor.target_id = target.id
+		_try_attack(actor, target)
+
+
+## 锁住开场跟随目标；接怪等待只用于由战士发起的这一次开战。
+func _open_ally_combat(actor: Unit, target_id: int) -> void:
+	if _ai_open_target >= 0:
+		return
+	_ai_open_target = target_id
+	if actor.kind == "warrior" and not actor.ai_contact:
+		_ai_tank_wait = actor.id
+
+
+## 精确按发起角色记录瞄准，不依赖 UI 当前操控的槽位。
+func set_ally_aim_actor(actor_id: int) -> void:
+	_ai_aim_actor = actor_id
+
+
+## 即使手动提交在输入层被拒绝，也让出这个角色的下一次自动决策。
+func reserve_manual_cast(actor_id: int) -> void:
+	if ally_ai_enabled and not paused and not finished:
+		_ai_manual_cast[actor_id] = true
+
+
+## 正式实战的手动和自动共用请求序号；隔离夹具仍可使用其显式序号。
+func next_player_cast_seq() -> int:
+	_player_cast_seq += 1
+	while _skill_seen_requests.has(_player_cast_seq):
+		_player_cast_seq += 1
+	return _player_cast_seq
+
+
+## 读取技能真实射程，正式资源的米只在模拟器边界转换一次。
+func ai_skill_range(skill: Dictionary) -> float:
+	return float(skill["cast_range_m"]) * SCENE_UNITS_PER_METER if formal_skill_sortie else float(skill["range"])
+
+
+## 距离独立于费用、冷却和公共间隔，避免首个超距错误掩盖实际不能施放。
+func ai_skill_ready(actor: Unit, slot: String, skill: Dictionary) -> bool:
+	if not actor.controllable:
+		return false
+	if formal_skill_sortie:
+		return (
+			not skill_input_locked and _skill_transactions_enabled
+			and actor.res >= float(skill["mana_cost"])
+			and not _skill_deadline_pending(actor.gcd_until)
+			and not _skill_deadline_pending(float(actor.skill_ready_at.get(skill["skill_id"], 0.0)))
+		)
+	return (
+		actor.res >= float(skill["cost"])
+		and time >= float(actor.cd_until.get(slot, 0.0))
+		and (skill.get("off_gcd", false) or time >= actor.gcd_until)
+	)
+
+
+## 死亡后跟随当前战士目标或稳定最近敌人；首次加入才用开怪目标。
+func _ally_attack_target(actor: Unit, allies: Array[Unit], enemies: Array[Unit]) -> Unit:
+	var target: Unit = AllyAI.enemy_target(self, actor.auto_target_id)
+	if target != null:
+		return target
+	if not actor.ai_joined:
+		target = AllyAI.enemy_target(self, _ai_open_target)
+	actor.ai_joined = true
+	if target == null:
+		for ally in allies:
+			if ally != actor and ally.kind == "warrior":
+				target = AllyAI.enemy_target(self, ally.auto_target_id)
+				if target != null:
+					break
+	if target == null:
+		var distance := INF
+		for enemy in enemies:
+			var next := actor.pos.distance_squared_to(enemy.pos)
+			if enemy.selectable and (next < distance or (next == distance and target != null and enemy.id < target.id)):
+				distance = next
+				target = enemy
+	actor.auto_target_id = target.id if target != null else -1
+	return target
+
+
+## 只在现有门禁内走自动施法，正式命令以当前固定步消费同一个接收队列。
+func _cast_ally_ai(actor: Unit, choice: Dictionary) -> void:
+	var slot: String = choice["slot"]
+	var aim := {"target": choice["target_id"]}
+	if not formal_skill_sortie:
+		if check_cast(actor.id, slot, aim)["ok"]:
+			cast_skill(actor.id, slot, aim, true)
+		return
+	var request := {"battle_id": skill_battle_id, "caster_id": actor.id,
+		"request_seq": next_player_cast_seq(), "slot": slot.to_upper(),
+		"expected_skill_id": actor.resolved_slots[slot]["skill_id"], "aim": aim}
+	if _enqueue_skill_command("cast", request, true)["queued"]:
+		# 本次自动命令是末项；同步回调产生的玩家命令仍留给下一固定步。
+		var command: Dictionary = _skill_pending.pop_back()
+		_execute_skill_command(command)
+
+
+## 手动动作、圆形避让、主动技和普通动作按固定顺序推进，保持玩家观察目标独立。
+func _tick_ally_ai(actor: Unit, dt: float) -> void:
+	var handoff := _ai_manual_cast.erase(actor.id)
+	actor.target_id = -1
+	if actor.order_kind == "move":
+		_set_ai_evading(actor, false)
+		if _move_toward(actor, actor.order_pos, dt, 3.0):
+			actor.order_kind = "none"
+		return
+	if handoff or actor.id == _ai_aim_actor or not actor.controllable:
+		_set_ai_evading(actor, false)
+		return
+	var enemies := living("enemy")
+	var circles := AllyAI.hazards_for(actor, enemies)
+	var in_danger := AllyAI.path_enters(actor.pos, actor.pos, circles)
+	_set_ai_evading(actor, in_danger)
+	if in_danger:
+		var escape := AllyAI.escape_point(actor.pos, _arena.grow(-actor.radius), circles)
+		if escape != actor.pos:
+			_move_toward(actor, escape, dt, 0.0)
+		return
+	var healing := actor.attack_kind == "heal"
+	if not healing and _ai_open_target < 0:
+		return
+	var allies := living("ally")
+	var target: Unit = AllyAI.heal_target(self, actor, allies) if healing else _ally_attack_target(actor, allies, enemies)
+	var decision := AllyAI.choose_skill(self, actor, target, allies, enemies)
+	var tank: Unit = units.get(_ai_tank_wait)
+	var waiting_for_tank := tank != null and tank.alive and tank.controllable and not tank.ai_contact
+	var can_act := healing or actor.ai_personal_order or not waiting_for_tank
+	var cast: Dictionary = decision["cast"]
+	var approach: Dictionary = decision["approach"]
+	if can_act and not cast.is_empty():
+		var epoch := _skill_queue_epoch
+		_cast_ally_ai(actor, cast)
+		if paused or finished or not actor.alive or (formal_skill_sortie and epoch != _skill_queue_epoch):
+			return
+	if target == null or not target.alive:
+		return
+	actor.target_id = target.id
+	var close_combat := actor.kind in ["warrior", "rogue"]
+	if close_combat:
+		_move_ally_safely(actor, target, actor.attack_range, dt, circles)
+	elif not approach.is_empty() and (cast.is_empty() or not can_act):
+		_move_ally_safely(actor, target, approach["reach"], dt, circles)
+	elif healing and cast.is_empty():
+		_move_ally_safely(actor, target, actor.attack_range, dt, circles)
+	if can_act and actor.pos.distance_to(target.pos) <= actor.attack_range and (not healing or target.hp < target.max_hp):
+		_try_attack(actor, target)
+
+
+## 只记录避让状态切换，便于用试玩日志复核撤离和恢复。
+func _set_ai_evading(actor: Unit, active: bool) -> void:
+	if actor.ai_evading != active:
+		actor.ai_evading = active
+		events.fire(&"ai_evade", [actor.id, active])
+
+
+## 预看这一固定步的实际路径，防止刚躲出预警又被追击或治疗拉回圈内。
+func _move_ally_safely(actor: Unit, target: Unit, reach: float, dt: float, circles: Array[Vector3]) -> void:
+	var distance := actor.pos.distance_to(target.pos)
+	if distance <= reach:
+		return
+	# 留少量入圈余量，避免分离推动后马上卡在射程边线。
+	var stop := reach * 0.96
+	var next := actor.pos.move_toward(target.pos, minf(actor.speed * dt, distance - stop))
+	var safe_arena := _arena.grow(-actor.radius)
+	var clamped := next.clamp(safe_arena.position, safe_arena.end)
+	if not AllyAI.path_enters(actor.pos, clamped, circles):
+		_move_toward(actor, target.pos, dt, stop)
+
+
 ## 暂停旧流程仍只改标志；隔离调度额外丢弃待执行命令和未完成时间余量。
 func set_paused(value: bool) -> void:
 	if not finished:
 		paused = value
+		if value:
+			_ai_manual_cast.clear()
+			_ai_aim_actor = -1
 		if value and _skill_schedule_active:
 			_skill_queue_epoch += 1
 			# 包含不足一步的余量；恢复从下一个完整步开始，不补跑暂停前未执行部分。
@@ -429,7 +746,7 @@ func set_paused(value: bool) -> void:
 
 
 ## 不发事件、不改状态的技能检查。返回 {ok, reason, target_id}。
-func check_cast(unit_id: int, key: String) -> Dictionary:
+func check_cast(unit_id: int, key: String, aim: Dictionary = {}) -> Dictionary:
 	if formal_skill_sortie:
 		# 原自动操作员继续走既有查询接口，判断改读实际五技能及公共冷却。
 		var view := get_skill_view(unit_id, key.to_upper())
@@ -449,17 +766,25 @@ func check_cast(unit_id: int, key: String) -> Dictionary:
 		return {"ok": false, "reason": "gcd", "target_id": -1}
 	var target_id := -1
 	var skill_range := float(skill["range"])
+	var directed := not aim.is_empty()
 	match String(skill["target"]):
 		"enemy":
-			var target := _resolve_enemy_target(unit)
-			if target == null:
+			if aim.has("point") and skill["id"] == "fire_burst":
+				var point: Vector2 = aim["point"]
+				if not _arena.has_point(point) or unit.pos.distance_to(point) > skill_range:
+					return {"ok": false, "reason": "out_of_range", "target_id": -1}
+				if float(skill["cost"]) > unit.res:
+					return {"ok": false, "reason": "no_resource", "target_id": -1}
+				return {"ok": true, "reason": "", "target_id": -1}
+			var target: Unit = units.get(aim.get("target")) if directed else _resolve_enemy_target(unit)
+			if target == null or not target.alive or not target.selectable or target.side != "enemy":
 				return {"ok": false, "reason": "no_target", "target_id": -1}
 			if target.pos.distance_to(unit.pos) > skill_range:
 				return {"ok": false, "reason": "out_of_range", "target_id": target.id}
 			target_id = target.id
 		"ally":
-			var target := _resolve_ally_target(unit)
-			if target == null:
+			var target: Unit = units.get(aim.get("target")) if directed else _resolve_ally_target(unit)
+			if target == null or not target.alive or not target.selectable or target.side != "ally":
 				return {"ok": false, "reason": "no_target", "target_id": -1}
 			if target.pos.distance_to(unit.pos) > skill_range:
 				return {"ok": false, "reason": "out_of_range", "target_id": target.id}
@@ -484,10 +809,10 @@ func _resolve_ally_target(unit: Unit) -> Unit:
 
 
 ## 旧施法保留原语义；完整隔离场及其残留单位直接拒绝，连拒绝事件也不发布。
-func cast_skill(unit_id: int, key: String) -> bool:
+func cast_skill(unit_id: int, key: String, aim: Dictionary = {}, automatic: bool = false) -> bool:
 	if _skill_requires_rebuild:
 		return false
-	var check := check_cast(unit_id, key)
+	var check := check_cast(unit_id, key, aim)
 	if not bool(check["ok"]):
 		var unit_missing: Unit = units.get(unit_id)
 		if unit_missing != null and not finished:
@@ -498,26 +823,38 @@ func cast_skill(unit_id: int, key: String) -> bool:
 	var target_id: int = int(check["target_id"])
 	var target: Unit = units.get(target_id)
 	var cost := float(skill["cost"])
-	if String(skill["target"]) != "self" and target != null:
+	if aim.is_empty() and String(skill["target"]) != "self" and target != null:
 		unit.target_id = target_id
 
-	events.fire(&"command_issued", [unit_id, "skill", target_id, target.pos if target != null else unit.pos])
+	var impact: Vector2 = aim.get("point", target.pos if target != null else unit.pos)
+	events.fire(&"command_issued", [unit_id, "skill", target_id, impact])
 	if cost > 0.0:
 		_change_resource(unit, -cost)
 	unit.cd_until[key] = time + float(skill["cooldown"])
 	if not bool(skill.get("off_gcd", false)):
 		unit.gcd_until = time + float(config["gcd"])
 	events.fire(&"skill_cast", [unit_id, String(skill["id"]), target_id, int(cost), float(unit.cd_until[key])])
+	if automatic:
+		events.fire(&"ai_skill_cast", [unit_id, String(skill["id"]), target_id])
 
+	var hit_ids: Array[int] = []
 	for effect: Dictionary in skill["effects"]:
-		_apply_effect(unit, target, String(skill["id"]), effect)
+		_apply_effect(unit, target, String(skill["id"]), effect, aim, hit_ids)
+	if not aim.is_empty() and not automatic:
+		_finish_player_attack(unit, target_id, impact, hit_ids)
+		# 有害控制由状态语义识别，破法突刺等伤害附带打断仍开启普攻。
+		if hit_ids.is_empty() and target != null and target.id == unit.auto_target_id:
+			for effect: Dictionary in skill["effects"]:
+				if effect["kind"] == "status" and effect.get("to") == "target" and effect.get("status") in ["polymorph", "sleep", "fear", "stun"]:
+					unit.auto_target_id = -1
 	return true
 
 
-func _apply_effect(caster: Unit, target: Unit, skill_id: String, effect: Dictionary) -> void:
+## 旧数值继续按单一结算入口推进，地面爆破仅覆盖原效果中心。
+func _apply_effect(caster: Unit, target: Unit, skill_id: String, effect: Dictionary, aim: Dictionary, hit_ids: Array[int]) -> void:
 	match String(effect["kind"]):
 		"damage":
-			var center := _effect_center(caster, target, String(effect.get("center", "target")))
+			var center: Vector2 = aim.get("point", _effect_center(caster, target, String(effect.get("center", "target"))))
 			var radius := float(effect.get("radius", 0.0))
 			var victims: Array[Unit] = []
 			if radius > 0.0:
@@ -527,6 +864,7 @@ func _apply_effect(caster: Unit, target: Unit, skill_id: String, effect: Diction
 			elif target != null and target.alive:
 				victims.append(target)
 			for victim in victims:
+				hit_ids.append(victim.id)
 				_damage(caster, victim, float(effect["amount"]), skill_id, true, _skill_school(skill_id))
 		"heal":
 			var center := _effect_center(caster, target, String(effect.get("center", "target")))
@@ -550,6 +888,13 @@ func _apply_effect(caster: Unit, target: Unit, skill_id: String, effect: Diction
 				_apply_status(holder, String(effect["status"]), caster.id, float(effect["duration"]), params)
 		"taunt":
 			if target != null and target.alive:
+				if player_controls and caster.kind == "warrior":
+					var highest := 0.0
+					for ally in living("ally"):
+						if ally.id != caster.id:
+							highest = maxf(highest, float(target.threat.get(ally.id, 0.0)))
+					target.threat[caster.id] = maxf(float(target.threat.get(caster.id, 0.0)), highest + maxf(1.0, highest * 0.1))
+					caster.ai_contact = ally_ai_enabled
 				_apply_status(target, "taunt", caster.id, float(effect["duration"]), {})
 		"interrupt":
 			if target != null and target.alive and not target.cast.is_empty() and bool((target.cast as Dictionary).get("interruptible", false)):
@@ -590,7 +935,7 @@ func _effect_center(caster: Unit, target: Unit, which: String) -> Vector2:
 
 # ── 结算原语 ──
 
-## 普攻/敌方保留实际旧谱、暴击与防护；正式场命中先扣同一盾池，再扣浮点生命并登记交战。
+## 伤害沿用暴击和防护结算；正式场先扣盾，真人场用实际扣血登记仇恨。
 func _damage(source: Unit, victim: Unit, base: float, skill_id: String, can_crit: bool, school: String = "physical") -> void:
 	if (_skill_requires_rebuild and not formal_skill_sortie) or not victim.alive:
 		return
@@ -613,63 +958,83 @@ func _damage(source: Unit, victim: Unit, base: float, skill_id: String, can_crit
 		var before := victim.hp
 		victim.hp = maxf(0.0, before - hit["hp_budget"])
 		var actual := before - victim.hp
-		# 命中实体才激活，伤害被全吸收也有效；敌方命中不伪造友方的伤害仇恨。
-		var enemy := victim if victim.side == "enemy" else source
-		var ally := source if source.side == "ally" else victim
-		if enemy.side == "enemy" and ally.side == "ally":
-			enemy.activated = true
-			enemy.engaged_allies[ally.id] = true
-			if source == ally and actual > 0.0:
-				enemy.threat[ally.id] = float(enemy.threat.get(ally.id, 0.0)) + actual * ally.threat_coef
+		_record_damage_engagement(source, victim, actual, skill_id)
 		# 公共旧事件仍报整数；取整只用于事件，不回写生命或仇恨。
 		events.fire(&"damage_dealt", [source.id, victim.id, roundi(actual), skill_id, is_crit, roundi(victim.hp)])
 		if victim.hp <= 0.0:
 			_down(victim, source.id)
 		return
+	var old_hp := victim.hp
 	victim.hp = maxi(0, int(victim.hp) - final_amount)
+	if player_controls:
+		_record_damage_engagement(source, victim, old_hp - victim.hp, skill_id)
 	events.fire(&"damage_dealt", [source.id, victim.id, final_amount, skill_id, is_crit, int(victim.hp)])
-	if source.side == "ally" and victim.side == "enemy":
-		victim.threat[source.id] = float(victim.threat.get(source.id, 0.0)) + float(final_amount) * source.threat_coef
+	if not player_controls and source.side == "ally" and victim.side == "enemy":
+		victim.threat[source.id] = float(victim.threat.get(source.id, 0.0)) + _damage_threat(source, final_amount, skill_id)
 	if victim.hp <= 0:
 		_down(victim, source.id)
 
 
-## 自动治疗保留旧治疗量；正式场把实际浮点增量按受疗者的交战快照分配一次仇恨。
+## 敌我实际命中才登记交战，盾全吸收也算命中；只有友方造成的实际扣血增加伤害仇恨。
+func _record_damage_engagement(source: Unit, victim: Unit, actual: float, skill_id: String) -> void:
+	var enemy := victim if victim.side == "enemy" else source
+	var ally := source if source.side == "ally" else victim
+	if enemy.side != "enemy" or ally.side != "ally":
+		return
+	enemy.activated = true
+	enemy.engaged_allies[ally.id] = true
+	if ally_ai_enabled:
+		ally.ai_contact = true
+	if source == ally and actual > 0.0:
+		_record_player_damage(ally, actual)
+		enemy.threat[ally.id] = float(enemy.threat.get(ally.id, 0.0)) + _damage_threat(ally, actual, skill_id)
+
+
+## 正式场和真人出征按本次实际回血登记交战仇恨，旧自动场沿用配表。
 func _heal(source: Unit, receiver: Unit, base: float, skill_id: String) -> void:
 	if (_skill_requires_rebuild and not formal_skill_sortie) or not receiver.alive:
 		return
 	var amount := roundi(base)
 	if formal_skill_sortie:
-		var engaged := _skill_engaged_enemies(receiver.id)
 		var before := receiver.hp
 		receiver.hp = minf(receiver.max_hp, before + float(amount))
 		var actual := receiver.hp - before
-		var share := _skill_heal_threat_share(actual, engaged.size())
-		if share > 0.0:
-			for enemy_id: int in engaged:
-				var enemy: Unit = units[enemy_id]
-				var previous := float(enemy.threat.get(source.id, 0.0))
-				var updated := previous + share
-				if updated > previous:
-					enemy.threat[source.id] = updated
-					enemy.engaged_allies[source.id] = true
+		_record_heal_engagement(source, receiver, actual)
 		events.fire(&"heal_done", [source.id, receiver.id, amount, roundi(actual), skill_id, roundi(receiver.hp)])
 		return
-	var effective := mini(amount, int(receiver.max_hp) - int(receiver.hp))
+	var effective := _effective_legacy_heal(receiver, amount)
 	receiver.hp += effective
+	if player_controls:
+		_record_heal_engagement(source, receiver, float(effective))
 	events.fire(&"heal_done", [source.id, receiver.id, amount, effective, skill_id, int(receiver.hp)])
-	if effective > 0:
+	if not player_controls and effective > 0:
 		var threat_gain := float(effective) * float(config.get("heal_threat", 0.5))
 		for enemy in living("enemy"):
 			enemy.threat[source.id] = float(enemy.threat.get(source.id, 0.0)) + threat_gain
 
 
-## 死亡先清自身盾及权威关系再通知；来源死亡不清其他活目标盾，旧默认行为保留。
+## 按受疗者的交战快照均分有效治疗仇恨；只有正增量入账才登记治疗者交战。
+func _record_heal_engagement(source: Unit, receiver: Unit, actual: float) -> void:
+	if actual <= 0.0:
+		return
+	var engaged := _skill_engaged_enemies(receiver.id)
+	var share := _skill_heal_threat_share(actual, engaged.size())
+	for enemy_id: int in engaged:
+		var enemy: Unit = units[enemy_id]
+		var previous := float(enemy.threat.get(source.id, 0.0))
+		var updated := previous + share
+		if updated > previous:
+			enemy.threat[source.id] = updated
+			enemy.engaged_allies[source.id] = true
+
+
+## 死亡通知前清理交战关系和自身盾；施盾者死亡时其他单位仍保留已获盾。
 func _down(unit: Unit, by_id: int) -> void:
 	unit.alive = false
 	unit.hp = 0.0
-	if _skill_requires_rebuild:
+	if _skill_requires_rebuild or player_controls:
 		_clear_skill_engagements(unit.id)
+	if _skill_requires_rebuild:
 		_retire_skill_shield(unit.shield)
 		unit.shield = {}
 	unit.order_kind = "none"
@@ -780,7 +1145,11 @@ func _regen(unit: Unit, dt: float) -> void:
 		events.fire(&"resource_changed", [unit.id, unit.res_kind, value, int(unit.res_max)])
 
 
+## 真人战斗由显式普攻与牧师支援驱动，自动模式继续使用旧指令。
 func _tick_ally(unit: Unit, dt: float) -> void:
+	if player_controls:
+		_tick_player_ally(unit, dt)
+		return
 	match unit.order_kind:
 		"move":
 			if _move_toward(unit, unit.order_pos, dt, 3.0):
@@ -848,6 +1217,7 @@ func _move_toward(unit: Unit, dest: Vector2, dt: float, stop_dist: float) -> boo
 	return dist - travel <= stop_dist + 0.001
 
 
+## 嘲讽优先，真人场只有挑战者严格越过门槛才换下仍有效的目标。
 func _enemy_target(unit: Unit) -> Unit:
 	var taunt: Dictionary = unit.statuses.get("taunt", {})
 	if not taunt.is_empty():
@@ -861,17 +1231,26 @@ func _enemy_target(unit: Unit) -> Unit:
 		if value > best_threat:
 			best = ally
 			best_threat = value
+	if player_controls:
+		var current: Unit = units.get(unit.target_id)
+		# 没有正仇恨时也保留已接敌目标；零仇恨的目标可被任意正仇恨挑战。
+		if current != null and current.alive and current.side == "ally":
+			if best_threat <= float(unit.threat.get(current.id, 0.0)) * 1.10:
+				return current
 	if best != null:
 		return best
 	return _nearest(unit.pos, "ally")
 
 
+## 实际追击对象由当前 AI 决策产生，读条期间仍使用开读时锁定的对象。
 func _tick_enemy(unit: Unit, dt: float) -> void:
 	if not unit.cast.is_empty():
 		if time >= float((unit.cast as Dictionary)["ends_at"]):
 			_resolve_cast(unit)
 		return
 	var target := _enemy_target(unit)
+	if player_controls:
+		unit.target_id = target.id if target != null else -1
 	if target == null:
 		return
 	var distance := unit.pos.distance_to(target.pos)
@@ -958,11 +1337,12 @@ func _check_end() -> void:
 		_finish("lose", "timeout")
 
 
-## 结束先清完整场盾和关系并封队列，再通知外层；结束回调不能复活旧命令。
+## 结束通知前清交战关系、正式盾和待执行命令，回调不能复活旧命令。
 func _finish(outcome: String, why: String) -> void:
 	finished = true
-	if _skill_requires_rebuild:
+	if _skill_requires_rebuild or player_controls:
 		_clear_skill_engagements()
+	if _skill_requires_rebuild:
 		_clear_skill_shields()
 	if _skill_schedule_active:
 		_skill_queue_epoch += 1
@@ -1007,6 +1387,12 @@ func snapshot(skill_validation: bool = false) -> Dictionary:
 			"target_id": unit.target_id, "order_kind": unit.order_kind, "order_pos": unit.order_pos,
 			"statuses": unit.statuses.keys(), "cast": cast_view, "attack_kind": unit.attack_kind,
 		})
+		if player_controls:
+			var frame: Dictionary = unit_list.back()
+			frame["auto_target_id"] = unit.auto_target_id
+			frame["damage_done"] = unit.damage_done
+			frame["threat"] = unit.threat
+			frame["cast_target_id"] = unit.cast.get("target_id", -1)
 		if unit.side == "ally":
 			var skill_views: Array = []
 			for key in SKILL_KEYS:
@@ -1014,7 +1400,8 @@ func snapshot(skill_validation: bool = false) -> Dictionary:
 					skill_views.append(get_skill_view(unit.id, key.to_upper()))
 					continue
 				var skill: Dictionary = unit.skills[key]
-				var check := check_cast(unit.id, key)
+				var aim := _player_skill_projection_aim(unit, skill["id"]) if player_controls else {}
+				var check := check_cast(unit.id, key, aim)
 				skill_views.append({
 					"key": key, "name": skill["name"], "cost": skill["cost"],
 					"cooldown": skill["cooldown"],
@@ -1080,6 +1467,8 @@ func get_skill_view(caster_id: int, slot: String) -> Dictionary:
 			else:
 				# 同一纯函数保留失败优先级；已接入技能额外校验事务所需属性，但不调用停场入口。
 				var query := {"battle_id": skill_battle_id, "caster_id": caster_id, "slot": slot, "expected_skill_id": raw["skill_id"]}
+				if player_controls:
+					query["aim"] = _player_skill_projection_aim(caster, raw["skill_id"])
 				# 完整模式的已接入技能同时预演最终数值，HUD不把可溢出的准备误报为可执行。
 				prepared = _prepare_skill_transaction(query) if _skill_full_numeric and view["implemented"] else _prepare_skill(query, view["implemented"] and _skill_transactions_enabled)
 			view["preparable"] = prepared["preparable"]
@@ -1144,31 +1533,37 @@ func _prepare_skill(request: Dictionary, transaction: bool = false) -> Dictionar
 		problems.append("%s.unit[%d]: 法力、位置或计时字段缺失/非有限/非法" % [skill.get("skill_id"), caster.id])
 	if not problems.is_empty():
 		return {"preparable": false, "reason": "CONFIG_ERROR", "problems": problems}
-	var target: Unit = caster if skill["target_kind"] == "SELF" else units.get(caster.target_id)
+	var aim: Dictionary = request.get("aim", {})
+	var target: Unit = caster if skill["target_kind"] == "SELF" else units.get(aim.get("target", caster.target_id))
+	var ground: bool = aim.has("point") and skill["skill_id"] == "mage.fire.flame_burst"
 	var target_side: String = caster.side if skill["target_kind"] != "ENEMY" else "enemy"
-	if target == null or not target.alive or not target.selectable or target.side != target_side:
+	if not ground and (target == null or not target.alive or not target.selectable or target.side != target_side):
 		return _skill_blocked("INVALID_TARGET")
-	if not target.pos.is_finite():
-		return {"preparable": false, "reason": "CONFIG_ERROR", "problems": PackedStringArray(["unit[%d].pos: 非有限位置" % target.id])}
-	# 统一按中心距离把场景坐标转世界米，半径和射程边界均包含。
-	if skill["target_kind"] != "SELF" and caster.pos.distance_to(target.pos) / SCENE_UNITS_PER_METER > float(skill["cast_range_m"]):
+	var center: Vector2 = aim["point"] if ground else target.pos
+	if not center.is_finite():
+		var problem := "skill.point: 非有限位置" if ground else "unit[%d].pos: 非有限位置" % target.id
+		return {"preparable": false, "reason": "CONFIG_ERROR", "problems": PackedStringArray([problem])}
+	# 正式路径的圈和结算都使用中心距；地面圆心还必须位于战场内。
+	if (ground and not _arena.has_point(center)) or (skill["target_kind"] != "SELF" and caster.pos.distance_to(center) / SCENE_UNITS_PER_METER > float(skill["cast_range_m"])):
 		return _skill_blocked("OUT_OF_RANGE", {"range_m": skill["cast_range_m"]})
 	var effect_targets: Array = []
 	for effect: Dictionary in skill["effects"]:
-		var ids: Array[int] = [target.id]
+		var ids: Array[int] = []
+		if not ground:
+			ids.append(target.id)
 		if effect["selector"] == "SELF":
 			ids = [caster.id]
 		elif effect["selector"] == "ENEMIES_AROUND_PRIMARY":
 			var secondary: Array[int] = []
 			for id: int in units:
 				var candidate: Unit = units[id]
-				if id == target.id or candidate.side != "enemy" or not candidate.alive or not candidate.selectable:
+				if id in ids or candidate.side != "enemy" or not candidate.alive or not candidate.selectable:
 					continue
 				if not candidate.pos.is_finite():
 					return {"preparable": false, "reason": "CONFIG_ERROR", "problems": PackedStringArray(["unit[%d].pos: 非有限位置" % id])}
-				if target.pos.distance_to(candidate.pos) / SCENE_UNITS_PER_METER <= float(effect["radius_m"]):
+				if center.distance_to(candidate.pos) / SCENE_UNITS_PER_METER <= float(effect["radius_m"]):
 					secondary.append(id)
-			# 不使用生成/容器遍历顺序；主目标先，其余唯一稳定单位 ID 升序。
+			# 主目标先，其余保持稳定顺序，地面空放也得到有效的空名单。
 			secondary.sort()
 			ids.append_array(secondary)
 		effect_targets.append(ids)
@@ -1182,7 +1577,7 @@ func _prepare_skill(request: Dictionary, transaction: bool = false) -> Dictionar
 		return _skill_blocked("SKILL_COOLDOWN", {"seconds": ready_at - time})
 	# 只锁定当前可知的参数与有序目标；输出属性/结算准备待数值合同补齐。
 	return {"preparable": true, "reason": "", "skill": skill.duplicate(true), "caster_id": caster.id,
-		"target_id": target.id, "prepared_at": time, "effect_targets": effect_targets}
+		"target_id": -1 if ground else target.id, "prepared_at": time, "effect_targets": effect_targets, "impact": center}
 
 
 ## 构造独立的内部拒绝信息；不发布事件，也不复用成功施法字段。
@@ -1247,7 +1642,7 @@ func _leave_skill_schedule() -> void:
 	_skill_accumulator = 0.0
 
 
-## 严格检查原始命令形状后才读取字段；技能仍只有规格五字段，调度元数据放外层。
+## 严格校验原始命令；真人施法可附目标身份或地面落点，旧入口仍使用五字段。
 func _skill_command_shape_valid(kind: Variant, payload: Variant) -> bool:
 	if not kind is String or kind not in ["move", "target", "prepare", "cast"] or not payload is Dictionary:
 		return false
@@ -1255,7 +1650,14 @@ func _skill_command_shape_valid(kind: Variant, payload: Variant) -> bool:
 		return false
 	match kind:
 		"prepare", "cast":
-			return payload.size() == 5 and payload.get("request_seq") is int and payload["request_seq"] >= 0 and payload.get("slot") is String and payload.get("expected_skill_id") is String
+			var shape_ok: bool = payload.get("request_seq") is int and payload["request_seq"] >= 0 and payload.get("slot") is String and payload.get("expected_skill_id") is String
+			if not shape_ok or payload.size() == 5:
+				return shape_ok
+			var aim: Variant = payload.get("aim")
+			if not player_controls or payload.size() != 6 or not aim is Dictionary or aim.size() != 1:
+				return false
+			var point: Variant = aim.get("point")
+			return aim.get("target") is int or (payload["expected_skill_id"] == "mage.fire.flame_burst" and point is Vector2 and point.is_finite())
 		"move":
 			return payload.size() == 3 and payload.get("pos") is Vector2 and payload["pos"].is_finite()
 		"target":
@@ -1264,7 +1666,7 @@ func _skill_command_shape_valid(kind: Variant, payload: Variant) -> bool:
 
 
 ## 接收统一队列，只返回入队/丢弃信息；绝非 CastResult，不触碰费用、技能计时或效果。
-func _enqueue_skill_command(kind: Variant, payload: Variant) -> Dictionary:
+func _enqueue_skill_command(kind: Variant, payload: Variant, automatic: bool = false) -> Dictionary:
 	# 正常发布回调可以入队；调用栈已退出却遗留的事务保护必须先停场。
 	if not _skill_transaction_pending.is_empty() and (not _skill_advancing or _skill_transaction_pending.get("phase") != "publish"):
 		_abort_skill_validation(_skill_transaction_pending)
@@ -1286,7 +1688,10 @@ func _enqueue_skill_command(kind: Variant, payload: Variant) -> Dictionary:
 	if finished or skill_input_locked:
 		return {"queued": false, "reason": "INPUT_LOCKED"}
 	_skill_receive_seq += 1
-	_skill_pending.append({"kind": kind, "receive_seq": _skill_receive_seq, "payload": payload.duplicate(true)})
+	var command := {"kind": kind, "receive_seq": _skill_receive_seq, "payload": payload.duplicate(true)}
+	if automatic:
+		command["automatic"] = true
+	_skill_pending.append(command)
 	return {"queued": true, "reason": "", "receive_seq": _skill_receive_seq}
 
 
@@ -1363,15 +1768,18 @@ func _skill_periodic_point(battle_id: String, queue_epoch: int) -> void:
 	_check_end()
 
 
-## 按接收顺序执行命令；正式右键沿用原战术命令，隔离目标命令仍只设目标。
+## 按接收顺序执行命令；真人目标动作记录持续指令，隔离目标动作仍只设目标。
 func _execute_skill_command(command: Dictionary) -> Dictionary:
 	var payload: Dictionary = command["payload"]
 	if not _skill_transaction_pending.is_empty():
 		_abort_skill_validation(_skill_transaction_pending)
 		return {"reason": "INPUT_LOCKED"}
 	if command["kind"] == "cast":
+		var automatic: bool = command.get("automatic", false)
+		if not automatic:
+			reserve_manual_cast(payload["caster_id"])
 		_skill_cast_dispatching = true
-		var resolved := _execute_skill_transaction(payload)
+		var resolved := _execute_skill_transaction(payload, automatic)
 		_skill_cast_dispatching = false
 		# GDScript 子调用运行时错误可返回到调用者；标记未清就停场，绝不继续下条命令。
 		if not _skill_transaction_pending.is_empty():
@@ -1389,6 +1797,9 @@ func _execute_skill_command(command: Dictionary) -> Dictionary:
 		var target: Unit = units.get(payload["target_id"])
 		if target == null or not target.alive or not target.selectable:
 			issue = "INVALID_TARGET"
+		elif player_controls:
+			if not issue_player_target(unit, target):
+				issue = "INVALID_TARGET"
 		elif formal_skill_sortie:
 			var applied := order_attack(unit.id, target.id) if target.side == "enemy" else order_heal(unit.id, target.id)
 			if not applied:
@@ -1828,7 +2239,7 @@ func _prepare_single_skill_transaction(prepared: Dictionary) -> Dictionary:
 
 
 ## 执行一次全量预演后的提交；结果先于缓存死亡通知和胜负，发布期间重入不递归反馈。
-func _execute_skill_transaction(request: Dictionary) -> Dictionary:
+func _execute_skill_transaction(request: Dictionary, automatic: bool = false) -> Dictionary:
 	if not _skill_transaction_pending.is_empty():
 		return {"ignored": true, "reason": "TRANSACTION_REENTRY"}
 	if not _skill_advancing or not _skill_cast_dispatching or not _skill_command_shape_valid("cast", request):
@@ -1839,6 +2250,8 @@ func _execute_skill_transaction(request: Dictionary) -> Dictionary:
 	_skill_transaction_pending = {"battle_id": battle_id, "request_seq": request["request_seq"], "caster_id": request["caster_id"], "skill_id": request["expected_skill_id"], "phase": "prepare", "problems": PackedStringArray(["transaction: 调用未正常完成"])}
 	var prepared := _prepare_skill_transaction(request)
 	var resolved := {"battle_id": battle_id, "request_seq": request["request_seq"], "caster_id": request["caster_id"], "skill_id": request["expected_skill_id"], "accepted": prepared["preparable"], "reason": prepared["reason"], "details": {}}
+	if automatic:
+		resolved["source"] = "ai"
 	if not prepared["preparable"]:
 		resolved["details"] = prepared.get("details", {}).duplicate(true)
 		if prepared["reason"] == "SKILL_CHANGED":
@@ -1884,11 +2297,17 @@ func _execute_skill_transaction(request: Dictionary) -> Dictionary:
 					unit.cast = state["cast"].duplicate(true)
 					unit.statuses = state["statuses"].duplicate(true)
 			death_notices = prepared["death_notices"].duplicate(true)
+		var hit_ids: Array[int] = []
 		for effect: Dictionary in details["effects"]:
+			if player_controls and effect["effect_kind"] == "MAGIC_DAMAGE":
+				_record_player_damage(caster, float(effect["actual_amount"]))
+				hit_ids.append(effect["target_id"])
 			if effect["effect_kind"] == "RESTORE_MANA":
 				caster.res = effect["mana_after"]
 			effect["cast_id"] = cast_id
 			effect["skill_id"] = request["expected_skill_id"]
+		if player_controls and not automatic:
+			_finish_player_attack(caster, prepared["target_id"], prepared["impact"], hit_ids)
 		# 仅新建/替换盾登记已成功的真实施法身份；复用去重项，不新增事件或取证集合。
 		if prepared.get("shield_issued", false):
 			var issued: Dictionary = details["effects"][0]["shield_after"]
@@ -2077,11 +2496,11 @@ func _install_full_skill_stats(stats_by_unit: Dictionary, engagements: Dictionar
 	return problems
 
 
-## 权威集合的稳定ID快照，只查询存活/激活/关联，不从仇恨或位置推断、不返回内部集合引用。
+## 正式数值场与真人场共用权威交战快照，仅按存活、激活和关联筛选。
 func _skill_engaged_enemies(ally_id: int) -> Array[int]:
 	var ids: Array[int] = []
 	var ally: Unit = units.get(ally_id)
-	if not _skill_full_numeric or ally == null or ally.side != "ally" or not ally.alive:
+	if (not _skill_full_numeric and not player_controls) or ally == null or ally.side != "ally" or not ally.alive:
 		return ids
 	for id: int in _ids:
 		var enemy: Unit = units[id]

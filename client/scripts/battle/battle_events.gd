@@ -10,6 +10,10 @@ signal command_rejected(unit_id, kind, reason)
 signal skill_cast(unit_id, skill_id, target_id, cost, cd_until)
 ## 隔离事务同步全部结算后的一次纯数据结果，包含正常拒绝。
 signal cast_resolved(result)
+## 旧版自动施法沿用既有效果事件，本信号只记录发令来源。
+signal ai_skill_cast(unit_id, skill_id, target_id)
+## 圆形避让开始或结束，每次状态切换只记录一次。
+signal ai_evade(unit_id, active)
 signal damage_dealt(source_id, target_id, amount, skill_id, is_crit, hp_after)
 signal heal_done(source_id, target_id, amount, effective, skill_id, hp_after)
 signal resource_changed(unit_id, kind, value, max)
@@ -30,6 +34,8 @@ const SCHEMA := {
 	"command_rejected": ["unit_id", "kind", "reason"],
 	"skill_cast": ["unit_id", "skill_id", "target_id", "cost", "cd_until"],
 	"cast_resolved": ["result"],
+	"ai_skill_cast": ["unit_id", "skill_id", "target_id"],
+	"ai_evade": ["unit_id", "active"],
 	"damage_dealt": ["source_id", "target_id", "amount", "skill_id", "is_crit", "hp_after"],
 	"heal_done": ["source_id", "target_id", "amount", "effective", "skill_id", "hp_after"],
 	"resource_changed": ["unit_id", "kind", "value", "max"],

@@ -24,4 +24,5 @@ target_kind = "SELF"
 cast_range_m = 0
 mana_cost = 0
 cooldown_s = 20
+auto_use = {"condition": "low_resource", "priority": 10, "threshold": 0.1}
 effects = Array[ExtResource("2_effect")]([SubResource("Effect_1")])

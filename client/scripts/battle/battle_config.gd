@@ -25,6 +25,10 @@ static func validate(config: Dictionary) -> PackedStringArray:
 			var skill_id: String = cls.get("skills", {}).get(slot_key, "")
 			if skill_id.is_empty() or not config["skills"].has(skill_id):
 				problems.append("职业 %s 的 %s 技能 %s 未定义" % [class_id, slot_key, skill_id])
+	for skill_id: String in config["skills"]:
+		var skill: Dictionary = config["skills"][skill_id]
+		if not _valid_auto_use(skill.get("auto_use", {})):
+			problems.append("%s.auto_use: 无效的自动施放规则" % skill_id)
 	for entry in config["wave"]:
 		if not config["enemies"].has(entry.get("enemy", "")):
 			problems.append("wave 里有未定义的敌人 %s" % entry.get("enemy", ""))
@@ -232,6 +236,8 @@ static func validate_resolved_skill(data: Dictionary) -> PackedStringArray:
 		problems.append("%s.icon: 缺失或类型错误；允许显式 null 占位" % id)
 	for field in ["cast_range_m", "mana_cost", "cooldown_s"]:
 		_check_number(data, field, id, problems)
+	if not _valid_auto_use(data.get("auto_use", {})):
+		problems.append("%s.auto_use: 无效的自动施放规则" % id)
 	var target: Variant = data.get("target_kind")
 	if target not in ["ENEMY", "ALLY", "SELF"]:
 		problems.append("%s.target_kind: 非法目标类型" % id)
@@ -290,6 +296,29 @@ static func validate_resolved_skill(data: Dictionary) -> PackedStringArray:
 	return problems
 
 
+## 旧表与正式资源共用规则验证；缺省或空字典只保留手动施放。
+static func _valid_auto_use(rule: Variant) -> bool:
+	if not rule is Dictionary:
+		return false
+	if rule.is_empty():
+		return true
+	if not _nonnegative_number(rule.get("priority")):
+		return false
+	var condition: Variant = rule.get("condition")
+	if condition in ["low_resource", "low_hp", "unprotected", "threatened", "heal_area"]:
+		var threshold: Variant = rule.get("threshold")
+		if not _nonnegative_number(threshold) or threshold <= 0.0 or threshold > 1.0:
+			return false
+	if condition in ["unprotected", "threatened", "basic_range"] and rule.get("status") not in ["shield", "mitigate", "haste"]:
+		return false
+	match condition:
+		"damage_area":
+			return _nonnegative_number(rule.get("crowd_priority"))
+		"heal_area":
+			return _nonnegative_number(rule.get("minimum")) and rule["minimum"] >= 1
+	return condition in ["ready", "low_resource", "low_hp", "unprotected", "threatened", "interrupt", "recover_aggro", "basic_range"]
+
+
 ## 统一拒绝缺失、非数字、无穷、NaN 与负值；布尔值不能充当数字。
 static func _nonnegative_number(value: Variant) -> bool:
 	return (value is float or value is int) and is_finite(float(value)) and float(value) >= 0.0
@@ -308,6 +337,8 @@ static func _skill_data(source: SkillDef) -> Dictionary:
 		"target_kind": source.target_kind, "cast_range_m": source.cast_range_m,
 		"mana_cost": source.mana_cost, "cooldown_s": source.cooldown_s, "effects": [],
 	}
+	if not source.auto_use.is_empty():
+		data["auto_use"] = source.auto_use.duplicate(true)
 	if source.icon_declared:
 		data["icon"] = source.icon
 	for source_effect in source.effects:
@@ -318,7 +349,7 @@ static func _skill_data(source: SkillDef) -> Dictionary:
 			"kind": source_effect.kind, "selector": source_effect.selector,
 			"power_coeff": source_effect.power_coeff, "flat_amount": source_effect.flat_amount,
 			"radius_m": source_effect.radius_m, "duration_s": source_effect.duration_s,
-			"uses_stable_crit": source_effect.uses_stable_crit if source_effect.stable_crit_declared else null,
-			"uses_mastery": source_effect.uses_mastery if source_effect.mastery_declared else null,
+			"uses_stable_crit": source_effect.uses_stable_crit,
+			"uses_mastery": source_effect.uses_mastery,
 		})
 	return data

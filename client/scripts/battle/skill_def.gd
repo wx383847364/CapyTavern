@@ -17,4 +17,6 @@ var icon_declared: bool = false
 @export var cast_range_m: float = NAN
 @export var mana_cost: float = NAN
 @export var cooldown_s: float = NAN
+## 场上 AI 的可选策略，空配置由玩家手动施放。
+@export var auto_use: Dictionary = {}
 @export var effects: Array[SkillEffectDef] = []

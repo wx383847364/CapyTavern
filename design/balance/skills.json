@@ -4,6 +4,7 @@
   "skills": {
     "slam": {
       "name": "猛击",
+      "auto_use": {"condition": "ready", "priority": 40},
       "cost": 30,
       "cooldown": 5,
       "range": 70,
@@ -18,6 +19,7 @@
     },
     "defensive_taunt": {
       "name": "挑衅守势",
+      "auto_use": {"condition": "recover_aggro", "priority": 10},
       "cost": 20,
       "cooldown": 12,
       "range": 90,
@@ -38,6 +40,7 @@
     },
     "whirlwind": {
       "name": "旋风斩",
+      "auto_use": {"condition": "damage_area", "priority": 50, "crowd_priority": 30},
       "cost": 40,
       "cooldown": 8,
       "range": 0,
@@ -54,6 +57,7 @@
     },
     "bloodrage": {
       "name": "蓄怒",
+      "auto_use": {"condition": "low_resource", "priority": 20, "threshold": 0.25},
       "cost": 0,
       "cooldown": 25,
       "range": 0,
@@ -68,6 +72,7 @@
     },
     "kick_stab": {
       "name": "破法突刺",
+      "auto_use": {"condition": "interrupt", "priority": 10},
       "cost": 25,
       "cooldown": 10,
       "range": 60,
@@ -85,6 +90,7 @@
     },
     "lethal_strike": {
       "name": "致命一击",
+      "auto_use": {"condition": "ready", "priority": 30},
       "cost": 55,
       "cooldown": 7,
       "range": 60,
@@ -99,6 +105,7 @@
     },
     "feint": {
       "name": "佯攻",
+      "auto_use": {"condition": "threatened", "priority": 20, "threshold": 0.5, "status": "mitigate"},
       "cost": 20,
       "cooldown": 20,
       "range": 0,
@@ -115,6 +122,7 @@
     },
     "adrenaline": {
       "name": "疾攻",
+      "auto_use": {"condition": "basic_range", "priority": 40, "status": "haste"},
       "cost": 30,
       "cooldown": 25,
       "range": 0,
@@ -131,6 +139,7 @@
     },
     "fire_burst": {
       "name": "烈焰爆破",
+      "auto_use": {"condition": "ready", "priority": 30},
       "cost": 30,
       "cooldown": 6,
       "range": 450,
@@ -147,6 +156,7 @@
     },
     "arcane_bolt": {
       "name": "奥术弹",
+      "auto_use": {"condition": "ready", "priority": 40},
       "cost": 20,
       "cooldown": 4,
       "range": 450,
@@ -161,6 +171,7 @@
     },
     "mana_armor": {
       "name": "魔力护甲",
+      "auto_use": {"condition": "unprotected", "priority": 20, "threshold": 0.6, "status": "mitigate"},
       "cost": 15,
       "cooldown": 18,
       "range": 0,
@@ -177,6 +188,7 @@
     },
     "evocation": {
       "name": "唤醒",
+      "auto_use": {"condition": "low_resource", "priority": 10, "threshold": 0.1},
       "cost": 0,
       "cooldown": 30,
       "range": 0,
@@ -191,6 +203,7 @@
     },
     "greater_heal": {
       "name": "强效治疗",
+      "auto_use": {"condition": "low_hp", "priority": 10, "threshold": 0.8},
       "cost": 25,
       "cooldown": 5,
       "range": 420,
@@ -204,6 +217,7 @@
     },
     "prayer": {
       "name": "治疗祷言",
+      "auto_use": {"condition": "heal_area", "priority": 30, "threshold": 0.75, "minimum": 2},
       "cost": 35,
       "cooldown": 9,
       "range": 0,
@@ -219,6 +233,7 @@
     },
     "ward": {
       "name": "护佑",
+      "auto_use": {"condition": "threatened", "priority": 20, "threshold": 0.6, "status": "mitigate"},
       "cost": 20,
       "cooldown": 14,
       "range": 420,
@@ -235,6 +250,7 @@
     },
     "meditate": {
       "name": "冥想",
+      "auto_use": {"condition": "low_resource", "priority": 40, "threshold": 0.25},
       "cost": 0,
       "cooldown": 30,
       "range": 0,

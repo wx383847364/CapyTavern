@@ -7,16 +7,7 @@ extends Resource
 @export var flat_amount: float = NAN
 @export var radius_m: float = NAN
 @export var duration_s: float = NAN
-# 布尔默认值本身不能表达“未填写”，加载显式字段时记录存在性。
-var stable_crit_declared: bool = false
-var mastery_declared: bool = false
-@export var uses_stable_crit: bool = false:
-	# 记录显式赋值，确保遗漏 false 字段也会被配置校验拦截。
-	set(value):
-		uses_stable_crit = value
-		stable_crit_declared = true
-@export var uses_mastery: bool = false:
-	# 记录显式赋值；这是配置存在性信息，不是运行时专精状态。
-	set(value):
-		uses_mastery = value
-		mastery_declared = true
+# 二进制导出会省略与脚本默认值相同的属性。使用空哨兵同时保留显式 true 和 false，
+# 由目录校验确保运行参数只能是布尔值，漏填的资源不会悄悄回落为关闭。
+@export_storage var uses_stable_crit: Variant = null
+@export_storage var uses_mastery: Variant = null

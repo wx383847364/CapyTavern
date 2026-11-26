@@ -5,6 +5,7 @@ extends SceneTree
 ## 打印 PASS / FAIL，有失败退出码 1。证据（存档前后 JSON、事件日志、截图）写到 --out。
 
 const SortieSession := preload("res://scripts/tavern/sortie_session.gd")
+const BattleController := preload("res://scripts/input/battle_controller.gd")
 const BattleSim := preload("res://scripts/battle/battle_sim.gd")
 const BattleLaunch := preload("res://scripts/battle/battle_launch.gd")
 
@@ -407,8 +408,190 @@ func _run() -> void:
 	for case: Array in [["F1_solo", false, false, false], ["F2_duo", true, false, true], ["F3_sets", true, true, false]]:
 		if not (await _formal_walk(case[0], case[1], case[2], case[3])):
 			return
-
+	for case: Array in [["AI_前排单人", 1], ["AI_四人", 4], ["AI_法牧", 2]]:
+		if not (await _ally_ai_sortie_walk(case[0], case[1])):
+			return
+	await _hit_feedback_walk()
 	_finish()
+
+
+## 从正常酒馆入口跑三类实战，完成后只统计同一战斗的真实事件。
+func _ally_ai_sortie_walk(tag: String, count: int) -> bool:
+	await _fresh_tavern()
+	SortieSession.args_override = PackedStringArray(["--seed=131"])
+	var recruited: bool = await _formal_prepare_party(true, false) if count == 2 else await _recruit(count)
+	if not recruited or not (await _open_sortie()):
+		return false
+	var old := _scene.get_instance_id()
+	if not (await _click("sortie_confirm")) or not (await _wait_scene("Battle", old)):
+		return _require(tag + " 实战入口", false)
+	_scene.set_process(false)
+	var sim: BattleSim = _scene.sim
+	sim.events.echo_stdout = false
+	sim.set_paused(false)
+	var front := sim.slot_unit(0)
+	var target: BattleSim.Unit = sim.living("enemy")[0]
+	_check(tag + " 真人出征默认启用 AI", sim.player_controls and sim.ally_ai_enabled and sim.formal_skill_sortie == (count == 2))
+	var at_start := front.pos
+	_formal_click(_scene, target.pos, MOUSE_BUTTON_RIGHT)
+	_formal_steps(sim, 1)
+	_check(tag + " 右键首个攻击对象", front.auto_target_id == target.id)
+	if count != 2:
+		_check(tag + " 近战点击后立即主动接近", front.pos.distance_to(target.pos) < at_start.distance_to(target.pos))
+	else:
+		# 浮点自然回蓝先于决策，按实际决策时刻构造 10% 与 9.9% 边界。
+		var dt := float(sim.config["tick"])
+		front.res = 10.0 - dt * front.res_regen
+		_formal_steps(sim, 1)
+		_check(tag + " 正式唤醒等于10%不放", near_resource(front.res, 10.0) and not front.skill_ready_at.has("mage.fire.evocation"))
+		front.res = 9.9 - dt * front.res_regen
+		_formal_steps(sim, 1)
+		_check(tag + " 正式唤醒低于10%自动事务成功且不覆盖手动结果",
+			front.res >= 44.8 and front.skill_ready_at.has("mage.fire.evocation") and _scene.last_cast_result.is_empty())
+		# 同场接着手动施盾，序号必须排在自动唤醒之后，HUD 只展示手动结果。
+		front.gcd_until = 0.0
+		_battle_key(KEY_E, true)
+		_battle_key(KEY_E, false)
+		_formal_steps(sim, 1)
+		_check(tag + " 自动和人工请求同场不碰撞且 HUD 收到人工结果",
+			_scene.last_cast_result.get("accepted", false) and _scene.last_cast_result.get("skill_id") == "mage.fire.flame_barrier"
+			and int(_scene.last_cast_result.get("request_seq", -1)) >= 2)
+	var guard := 0
+	while not sim.finished and guard < 3000:
+		sim.step(float(sim.config["tick"]))
+		guard += 1
+	_check(tag + " 无后续指令的战斗自行结束", sim.finished and sim.result in ["win", "lose"] and front.damage_done > 0.0)
+	var tally := {"auto": 0, "interrupt": 0, "evade": 0, "heal": 0.0, "overheal": 0.0}
+	for line: String in sim.events.lines:
+		var event: Dictionary = JSON.parse_string(line)
+		match String(event["e"]):
+			"ai_skill_cast":
+				tally["auto"] += 1
+			"enemy_cast_interrupted":
+				tally["interrupt"] += 1
+			"ai_evade":
+				if event["active"]:
+					tally["evade"] += 1
+			"heal_done":
+				tally["heal"] += event["effective"]
+				tally["overheal"] += maxi(0, int(event["amount"]) - int(event["effective"]))
+			"cast_resolved":
+				var result: Dictionary = event["result"]
+				if result.get("source") == "ai" and result.get("accepted", false):
+					tally["auto"] += 1
+				for effect: Dictionary in result.get("details", {}).get("effects", []):
+					if effect.get("effect_kind") == "HEAL":
+						tally["heal"] += effect["actual_amount"]
+						tally["overheal"] += effect["overheal_amount"]
+	print("ALLY_AI_WALK ", tag, " outcome=", sim.result, " elapsed=", sim.time, " ", JSON.stringify(tally))
+	_check(tag + " 自动技能走真实结算日志", tally["auto"] > 0)
+	await _shot(tag + "_result")
+	return true
+
+
+## 资源边界用近似相等报告决策点值，是否施法仍以实际技能状态判断。
+func near_resource(actual: float, expected: float) -> bool:
+	return absf(actual - expected) < 0.00001
+
+
+## 在真实战斗场景用普攻和旋风斩核对受击目标，并保留首帧窗口截图。
+func _hit_feedback_walk() -> void:
+	current_scene.free()
+	current_scene = null
+	BattleLaunch.from_tavern = false
+	BattleLaunch.autoplay = false
+	BattleLaunch.slots = BattleLaunch.default_slots(4)
+	BattleLaunch.seed = 121
+	var battle: Node = load("res://scenes/battle/battle.tscn").instantiate()
+	root.add_child(battle)
+	current_scene = battle
+	battle.set_process(false)
+	var sim: BattleSim = battle.sim
+	# 该夹具只检查一次手动打击的画面；完整 AI 由上面的出征验收覆盖。
+	sim.ally_ai_enabled = false
+	var view: Node2D = battle.get_node("View")
+	var tank := sim.slot_unit(0)
+	var mage := sim.slot_unit(2)
+	var foes := sim.living("enemy")
+	var first := foes[0]
+	var second := foes[1]
+	tank.pos = Vector2(600, 400)
+	mage.pos = Vector2(500, 525)
+	first.pos = Vector2(660, 400)
+	second.pos = Vector2(590, 490)
+	foes[2].pos = Vector2(800, 440)
+	foes[3].pos = Vector2(900, 620)
+	for foe in foes:
+		foe.speed = 0.0
+		foe.next_attack_at = INF
+		foe.cast_cd_until = INF
+	sim.set_paused(false)
+	sim.config["crit_chance"] = 0.0
+	battle.controller.player_right_click(first.pos, first.id)
+	sim.step(0.05)
+	battle._refresh_view()
+	var plain: Dictionary = view._enemy_hits.get(first.id, {})
+	_check("命中反馈：普攻只点亮受伤怪且没有暴击环",
+		view._enemy_hits.size() == 1 and not plain.is_empty()
+		and int(plain["flash_at"]) - int(plain["critical_at"]) == view.CRITICAL_RING_MS)
+	await RenderingServer.frame_post_draw
+	var image := root.get_texture().get_image()
+	var center := Vector2i(first.pos * Vector2(image.get_size()) / root.get_visible_rect().size)
+	var flash_pixel := image.get_pixelv(center)
+	_check("命中反馈：普通命中帧怪物中心实际闪白", flash_pixel.g > 0.45 and flash_pixel.b > 0.45, str(flash_pixel))
+	_check("命中反馈：普通命中截图保存", image.save_png(_dir.path_join("H01_hit_flash.png")) == OK)
+
+	await create_timer(0.17).timeout
+	battle._refresh_view()
+	_check("命中反馈：到时清除普攻闪白", view._enemy_hits.is_empty())
+	await RenderingServer.frame_post_draw
+	var normal_pixel := root.get_texture().get_image().get_pixelv(center)
+	_check("命中反馈：闪白结束后恢复怪物原色", normal_pixel.g < 0.34 and normal_pixel.b < 0.34, str(normal_pixel))
+
+	# 让精英预警与群攻同帧显示，截图可核对怪物本体、短环与地面预警的层次。
+	sim._start_cast(foes[3], tank)
+	sim.config["crit_chance"] = 1.0
+	var cast: bool = battle.controller.submit_player_skill("e", Vector2.ZERO, false)
+	battle._refresh_view()
+	var first_crit: Dictionary = view._enemy_hits.get(first.id, {})
+	var second_crit: Dictionary = view._enemy_hits.get(second.id, {})
+	_check("命中反馈：旋风斩只给两只命中的怪各一圈暴击环", cast and view._enemy_hits.size() == 2
+		and not first_crit.is_empty() and first_crit["flash_at"] == first_crit["critical_at"]
+		and not second_crit.is_empty() and second_crit["flash_at"] == second_crit["critical_at"])
+	await RenderingServer.frame_post_draw
+	_check("命中反馈：旋风斩暴击和地面预警截图保存",
+		root.get_texture().get_image().save_png(_dir.path_join("H02_critical_whirlwind.png")) == OK)
+
+	# 只挪动显示计时以避免依赖毫秒整数相等；再次命中仍走真实普攻。
+	if not first_crit.is_empty():
+		var ring_start := int(first_crit["critical_at"])
+		first_crit["flash_at"] -= 15
+		var previous_flash := int(first_crit["flash_at"])
+		tank.next_attack_at = 0.0
+		sim.step(0.05)
+		_check("命中反馈：连续暴击刷新闪白但不重开短环",
+			first_crit["flash_at"] > previous_flash and first_crit["critical_at"] == ring_start)
+	sim.set_paused(true)
+	battle._refresh_view()
+	_check("命中反馈：暂停清除在播反馈", view._enemy_hits.is_empty())
+	sim.set_paused(false)
+	battle.controller.select_slot(mage.slot)
+	var empty: bool = battle.controller.submit_player_skill("q", Vector2(300, 740), true)
+	_check("命中反馈：范围技能空放不闪白", empty and view._enemy_hits.is_empty())
+
+	battle.controller.select_slot(tank.slot)
+	battle.controller.player_right_click(first.pos, first.id)
+	first.hp = 1.0
+	tank.next_attack_at = 0.0
+	sim.step(0.05)
+	_check("命中反馈：击杀也有反馈，结算立即清理", not first.alive and view._enemy_hits.has(first.id))
+	sim._finish("win", "all_enemies_down")
+	_check("命中反馈：结果页没有残留反馈", view._enemy_hits.is_empty())
+	var bus := sim.events
+	root.remove_child(battle)
+	_check("命中反馈：离场断开伤害订阅", not bus.damage_dealt.is_connected(battle._on_damage_dealt))
+	battle.free()
+	current_scene = null
 
 
 ## 在测试存档中准备已有套装与 t2；仍通过真实出征按钮锁定，不直接构造 BattleLaunch。
@@ -435,6 +618,7 @@ func _formal_prepare_party(duo: bool, equipped: bool) -> bool:
 
 ## 正式战场合成鼠标走当前 viewport 的实际变换和 Scene 入参，不直接调用控制器。
 func _formal_click(canvas_node: Node2D, local_pos: Vector2, index: MouseButton) -> void:
+	_scene._refresh_view()
 	var viewport_pos := canvas_node.get_global_transform_with_canvas() * local_pos
 	for pressed: bool in [true, false]:
 		var event := InputEventMouseButton.new()
@@ -445,6 +629,82 @@ func _formal_click(canvas_node: Node2D, local_pos: Vector2, index: MouseButton) 
 		event.global_position = viewport_pos
 		event.pressed = pressed
 		root.push_input(event, true)
+
+
+## 投递真实键位形状，由战斗场景的 InputMap 判定而不是直接调用控制器。
+func _battle_key(key: Key, pressed: bool) -> void:
+	var event := InputEventKey.new()
+	event.physical_keycode = key
+	event.pressed = pressed
+	root.push_input(event, true)
+
+
+## 在正式出征复用实际 View、设置和技能队列，覆盖两层血条与按住取消。
+func _formal_target_hud(tag: String, mage: BattleSim.Unit, priest: BattleSim.Unit, enemy: BattleSim.Unit) -> void:
+	var sim: BattleSim = _scene.sim
+	var view: Node2D = _scene.get_node("View")
+	enemy.target_id = mage.id
+	_scene.controller.select_target(enemy.id)
+	_scene._refresh_view()
+	_check(tag + " 正式顶部血条命中当前敌人",
+		view.hit_test(view.TARGET_BAR.get_center()).get("id") == enemy.id)
+	_formal_click(view, view.TARGET_OF_TARGET_BAR.get_center(), MOUSE_BUTTON_LEFT)
+	_check(tag + " 点击目标的目标只切目标，队伍操控槽保持",
+		_scene.controller.selected_slot == mage.slot and mage.selected_target_id == mage.id)
+	_formal_click(view, view._portrait_rect(priest.slot).get_center(), MOUSE_BUTTON_LEFT)
+	_check(tag + " 队伍头像只切治疗或观察目标",
+		_scene.controller.selected_slot == mage.slot and mage.selected_target_id == priest.id)
+	_battle_key(KEY_F2, true)
+	_battle_key(KEY_F2, false)
+	_check(tag + " F2 与数字槽共用操控角色", _scene.controller.selected_slot == priest.slot)
+	_formal_click(view, view._world_label_rect(view._by_id[mage.id]).get_center(), MOUSE_BUTTON_LEFT)
+	_check(tag + " 头顶血条和头像命中治疗目标", priest.selected_target_id == mage.id)
+	mage.hp -= 18.25
+	_scene._refresh_view()
+	_check(tag + " 正式治疗投影预览与生命仍分开",
+		is_equal_approx(view._hud["heal_preview"], 18.25) and mage.hp == mage.max_hp - 18.25)
+	mage.hp = mage.max_hp
+	_formal_click(view, view.OUTPUT_PANEL.get_center(), MOUSE_BUTTON_RIGHT)
+	_check(tag + " 统计窗拦截右键走位", sim._skill_pending.is_empty())
+	_formal_click(view, view.SETTINGS_BUTTON.get_center(), MOUSE_BUTTON_LEFT)
+	_formal_click(view, view._option_rect(1).get_center(), MOUSE_BUTTON_LEFT)
+	_check(tag + " 设置打开会暂停且写入独立偏好",
+		_scene._settings_open and sim.paused and _scene.controller.preferences["release_cast"])
+	var loaded := BattleController.new()
+	loaded.load_preferences()
+	_check(tag + " 独立控制器读回施法偏好", loaded.preferences["release_cast"])
+	_formal_click(view, view.SETTINGS_CLOSE.get_center(), MOUSE_BUTTON_LEFT)
+	_check(tag + " 关闭设置仍暂停", sim.paused and not _scene._settings_open)
+	_battle_key(KEY_P, true)
+	_battle_key(KEY_P, false)
+	_battle_key(KEY_F1, true)
+	_battle_key(KEY_F1, false)
+	_scene.controller.select_target(enemy.id)
+	_battle_key(KEY_Q, true)
+	_check(tag + " 按住范围技能只显示预览不入队", _scene._aim_key == "q" and sim._skill_pending.is_empty() and view._hud["aim"]["radius"] == 200.0)
+	_battle_key(KEY_ESCAPE, true)
+	_battle_key(KEY_ESCAPE, false)
+	_battle_key(KEY_Q, false)
+	_check(tag + " Esc 后松手不释放", _scene._aim_key.is_empty() and sim._skill_pending.is_empty())
+	_scene.controller.select_target(mage.id)
+	_scene._pointer = Vector2(625, 325)
+	var mana := mage.res
+	_battle_key(KEY_Q, true)
+	_battle_key(KEY_Q, false)
+	var empty := _formal_cast(tag, "mage.fire.flame_burst")
+	_check(tag + " 无敌方目标时按住松开一次地面空放",
+		not empty.is_empty() and empty["effects"].is_empty() and mage.res < mana and _scene._skill_result_notice.contains("未命中"))
+	_check(tag + " 空放未开启自动攻击", mage.auto_target_id == -1 and mage.damage_done == 0)
+	_check(tag + " 正式范围空放无命中反馈", view._enemy_hits.is_empty())
+	# 后续历史回归仍从资源和技能计时的标准状态开始。
+	mage.res = mana
+	mage.skill_ready_at.erase("mage.fire.flame_burst")
+	mage.gcd_until = 0.0
+	_formal_click(view, view.SETTINGS_BUTTON.get_center(), MOUSE_BUTTON_LEFT)
+	_formal_click(view, view._option_rect(1).get_center(), MOUSE_BUTTON_LEFT)
+	_formal_click(view, view.SETTINGS_CLOSE.get_center(), MOUSE_BUTTON_LEFT)
+	_battle_key(KEY_P, true)
+	_battle_key(KEY_P, false)
 
 
 ## 用正常步长跨过公共冷却或到期点，保留期间发生的正式动作。
@@ -506,10 +766,12 @@ func _formal_heals(tag: String, mage: BattleSim.Unit, priest: BattleSim.Unit, fi
 	return true
 
 
-## 让实际波次施法者完成暗影箭；起读条不能提前给暴露目标建立交战。
+## 从重新布置的接敌站位开始验证暗影箭；起读条不能提前建立交战。
 func _formal_enemy_spell(tag: String, mage: BattleSim.Unit, caster: BattleSim.Unit) -> void:
 	var sim: BattleSim = _scene.sim
+	# 本用例重新布置初始接敌，清掉此前走查阶段的追击对象。
 	caster.pos = mage.pos + Vector2(260, 0)
+	caster.target_id = -1
 	caster.cast_cd_until = 0.0
 	var before := mage.hp
 	_formal_steps(sim, 1)
@@ -519,7 +781,7 @@ func _formal_enemy_spell(tag: String, mage: BattleSim.Unit, caster: BattleSim.Un
 		and caster.engaged_allies.has(mage.id) and mage.hp < before)
 
 
-## 闯过真实酒馆、战斗和返场。数值用例在已加载正式场中钳住时间及站位，以可重复的普通攻击结束。
+## 走查真实出征、正式技能及命中反馈和返场，固定部分站位使数值与结果可重复。
 func _formal_walk(tag: String, duo: bool, equipped: bool, win: bool) -> bool:
 	print("══ 正式五技能 ", tag, " ══")
 	await _fresh_tavern()
@@ -557,6 +819,8 @@ func _formal_walk(tag: String, duo: bool, equipped: bool, win: bool) -> bool:
 		return false
 	_scene.set_process(false)
 	var sim: BattleSim = _scene.sim
+	# 保留旧数值夹具的逐技能输入与断言，实战 AI 另走完整入口。
+	sim.ally_ai_enabled = false
 	sim.set_paused(false)
 	var locks := _events("sortie_locked", start)
 	var loads := _events("battle_loaded", start)
@@ -603,6 +867,7 @@ func _formal_walk(tag: String, duo: bool, equipped: bool, win: bool) -> bool:
 			and enemies.all(func(enemy: BattleSim.Unit) -> bool: return enemy.threat.is_empty() and not enemy.activated))
 		mage.hp = mage.max_hp
 		priest.next_attack_at = 1000.0
+		_formal_target_hud(tag, mage, priest, first)
 	await _press("skill_e")
 	var barrier := _formal_cast(tag, "mage.fire.flame_barrier")
 	if barrier.is_empty():
@@ -635,10 +900,16 @@ func _formal_walk(tag: String, duo: bool, equipped: bool, win: bool) -> bool:
 	var q_expected := 1.7 * 74.0 * (1.05 if equipped else 1.0) * 1.025
 	_check(tag + " Q 保留范围名单顺序及套装单次 5%", targets.size() == 2 and targets[0]["target_id"] == first.id
 		and targets[1]["target_id"] == second.id and is_equal_approx(targets[0]["raw_amount"], q_expected)
-		and is_equal_approx(targets[1]["raw_amount"], q_expected) and mage.order_kind == "attack", str(targets))
+		and is_equal_approx(targets[1]["raw_amount"], q_expected) and mage.auto_target_id == first.id, str(targets))
 	_check(tag + " Q 中文结果", _scene._skill_result_notice.contains("2 个目标") and _scene._skill_result_notice.contains("烈焰爆破"))
-	_formal_steps(sim, 21)
 	var view: Node2D = _scene.get_node("View")
+	var first_hit: Dictionary = view._enemy_hits.get(first.id, {})
+	var second_hit: Dictionary = view._enemy_hits.get(second.id, {})
+	_check(tag + " 正式范围伤害只让两个实际扣血目标闪白",
+		view._enemy_hits.size() == 2 and not first_hit.is_empty() and not second_hit.is_empty()
+		and int(first_hit["flash_at"]) - int(first_hit["critical_at"]) == view.CRITICAL_RING_MS
+		and int(second_hit["flash_at"]) - int(second_hit["critical_at"]) == view.CRITICAL_RING_MS)
+	_formal_steps(sim, 21)
 	var fireball_button: Rect2 = view.call("_skill_rect", 1)
 	_formal_click(view, fireball_button.get_center(), MOUSE_BUTTON_LEFT)
 	var ball := _formal_cast(tag, "mage.fire.fireball")
@@ -664,11 +935,16 @@ func _formal_walk(tag: String, duo: bool, equipped: bool, win: bool) -> bool:
 		var offset := 0
 		for enemy: BattleSim.Unit in sim.living("enemy"):
 			enemy.hp = 1.0
-			enemy.pos = mage.pos + Vector2(55, 55 * offset)
+			enemy.pos = mage.pos + Vector2(55 + 85 * offset, 15)
 			enemy.speed = 0.0
 			offset += 1
-		mage.next_attack_at = 0.0
-		_formal_steps(sim, 160)
+		# 治疗后当前操控仍是牧师，先用实际快捷键切回输出角色再逐个右键。
+		_battle_key(KEY_F1, true)
+		_battle_key(KEY_F1, false)
+		for enemy: BattleSim.Unit in sim.living("enemy"):
+			_formal_click(_scene, enemy.pos, MOUSE_BUTTON_RIGHT)
+			mage.next_attack_at = 0.0
+			_formal_steps(sim, 1)
 	else:
 		mage.hp = 1.0
 		first.pos = mage.pos + Vector2(50, 0)

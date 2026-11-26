@@ -70,6 +70,7 @@ func _initialize() -> void:
 	_s1b4_tree_cases.call_deferred()
 
 
+## 执行旧机制和真人操作回归。
 func _run_all() -> void:
 	_full_battles()
 	_invalid_skills()
@@ -77,6 +78,491 @@ func _run_all() -> void:
 	_command_rules()
 	_interrupt_and_status()
 	_determinism()
+	_player_control_cases()
+	_ally_ai_cases()
+	_player_threat_cases()
+	for primary_index: int in [0, 2, 3]:
+		_player_whirlwind_case(primary_index, false)
+	_player_whirlwind_case(0, true)
+
+
+## 固定站位和敌方计时，只让被测 AI 执行真实命令和结算。
+func _ally_ai_fixture() -> Dictionary:
+	var made := _make(["warrior", "rogue", "mage", "priest"], 131, {"crit_chance": 0.0})
+	var sim: BattleSim = made["sim"]
+	sim.player_controls = true
+	sim.ally_ai_enabled = true
+	for index in 4:
+		var enemy: BattleSim.Unit = sim.living("enemy")[index]
+		enemy.pos = Vector2(900, 320) if index == 0 else Vector2(1570, 300 + index * 145)
+		enemy.speed = 0.0
+		enemy.next_attack_at = INF
+		enemy.cast_cd_until = INF
+	for index in 4:
+		sim.slot_unit(index).pos = Vector2(300, 320 + index * 100)
+	return made
+
+
+## 覆盖开怪等待、追击、手动接管及同种子连续战斗轨迹。
+func _ally_ai_cases() -> void:
+	var traces: Array[PackedStringArray] = []
+	for trial in 2:
+		var made := _ally_ai_fixture()
+		var sim: BattleSim = made["sim"]
+		var controller: BattleController = made["controller"]
+		var tank := sim.slot_unit(0)
+		var mage := sim.slot_unit(2)
+		var target: BattleSim.Unit = sim.living("enemy")[0]
+		mage.pos = Vector2(560, 570)
+		controller.select_slot(mage.slot)
+		controller.select_target(target.id + 1)
+		controller.select_slot(tank.slot)
+		controller.player_right_click(target.pos, target.id)
+		var tank_start := tank.pos
+		sim.step(0.05)
+		_check("AI 战士先跑，法师跟随入位但保持观察目标", tank.pos.x > tank_start.x
+			and mage.auto_target_id == target.id and mage.selected_target_id == target.id + 1
+			and mage.damage_done == 0.0 and not tank.ai_contact)
+		for step in 100:
+			sim.step(0.05)
+		_check("AI 战士接怪后法师自动输出，普攻射程内停止追击", tank.ai_contact and mage.damage_done > 0.0
+			and tank.pos.distance_to(target.pos) <= tank.attack_range and controller.selected_slot == tank.slot)
+		var stopped := tank.pos
+		for step in 4:
+			sim.step(0.05)
+		_check("AI 不把已在普攻距离内的战士推进目标中心", tank.pos == stopped)
+		traces.append(sim.events.lines.duplicate())
+	_check("实战 AI 同种子、同输入的全部事件逐行一致", traces[0] == traces[1])
+
+	var made := _ally_ai_fixture()
+	var sim: BattleSim = made["sim"]
+	var controller: BattleController = made["controller"]
+	var tank := sim.slot_unit(0)
+	var mage := sim.slot_unit(2)
+	var target: BattleSim.Unit = sim.living("enemy")[0]
+	mage.pos = target.pos + Vector2(-300, 110)
+	controller.player_right_click(target.pos, target.id)
+	sim.step(0.05)
+	_check("AI 无接触不会按时间抢跑", mage.damage_done == 0.0)
+	sim._damage(target, tank, 10.0, "", false)
+	sim.step(0.05)
+	_check("AI 战士先受击也算接怪", mage.damage_done > 0.0)
+
+	made = _ally_ai_fixture()
+	sim = made["sim"]
+	controller = made["controller"]
+	tank = sim.slot_unit(0)
+	mage = sim.slot_unit(2)
+	target = sim.living("enemy")[0]
+	mage.pos = target.pos + Vector2(-300, 100)
+	tank.pos = target.pos + Vector2(-80, 0)
+	controller.player_right_click(target.pos, target.id)
+	controller.select_target(target.id)
+	_check("AI 手动嘲讽实际施加", controller.submit_player_skill("w", Vector2.ZERO, false))
+	sim.step(0.05)
+	_check("AI 成功嘲讽立即放行跟随输出", mage.damage_done > 0.0 and target.statuses.has("taunt"))
+
+	for override in ["manual", "fallen"]:
+		made = _ally_ai_fixture()
+		sim = made["sim"]
+		controller = made["controller"]
+		tank = sim.slot_unit(0)
+		mage = sim.slot_unit(2)
+		target = sim.living("enemy")[0]
+		mage.pos = target.pos + Vector2(-300, 100)
+		controller.player_right_click(target.pos, target.id)
+		if override == "manual":
+			controller.select_slot(mage.slot)
+			controller.player_right_click(target.pos, target.id)
+		else:
+			sim._down(tank, target.id)
+		sim.step(0.05)
+		_check("AI 接怪等待解除 " + override, mage.damage_done > 0.0 and not tank.ai_contact)
+
+	made = _ally_ai_fixture()
+	sim = made["sim"]
+	controller = made["controller"]
+	tank = sim.slot_unit(0)
+	mage = sim.slot_unit(2)
+	target = sim.living("enemy")[0]
+	mage.pos = target.pos + Vector2(-300, 100)
+	target.hp = 1.0
+	controller.select_slot(mage.slot)
+	controller.select_target(target.id)
+	_check("AI 首发手动伤害可直接击杀", controller.submit_player_skill("w", Vector2.ZERO, false) and not target.alive)
+	sim.step(0.05)
+	_check("AI 首发击杀仍开怪，其他队员接续存活目标", tank.auto_target_id != -1 and tank.auto_target_id != target.id)
+	_ally_ai_range_cases()
+	_ally_ai_support_cases()
+	_ally_ai_interrupt_case()
+
+
+## 盗贼去实际攻击目标处打断可打断技能，选中的观察目标不会改写攻击。
+func _ally_ai_interrupt_case() -> void:
+	var made := _ally_ai_fixture()
+	var sim: BattleSim = made["sim"]
+	var controller: BattleController = made["controller"]
+	var rogue := sim.slot_unit(1)
+	var caster: BattleSim.Unit = sim.living("enemy")[2]
+	caster.pos = rogue.pos + Vector2(50, 0)
+	sim._start_cast(caster, rogue)
+	controller.select_slot(rogue.slot)
+	controller.player_right_click(caster.pos, caster.id)
+	controller.select_target(sim.living("enemy")[0].id)
+	sim.step(0.05)
+	_check("AI 破法突刺打断实际攻击目标的读条", caster.cast.is_empty()
+		and _count(sim.events, "enemy_cast_interrupted") == 1 and rogue.auto_target_id == caster.id)
+	_check("AI 打断后保留玩家的观察目标", rogue.selected_target_id != caster.id)
+
+
+## 检查远程距离、唤醒边界和手动占用；无可用技能时不为远程技能追击。
+func _ally_ai_range_cases() -> void:
+	var made := _ally_ai_fixture()
+	var sim: BattleSim = made["sim"]
+	var controller: BattleController = made["controller"]
+	var mage := sim.slot_unit(2)
+	var target: BattleSim.Unit = sim.living("enemy")[0]
+	mage.pos = Vector2(300, 475)
+	controller.select_slot(mage.slot)
+	controller.player_right_click(target.pos, target.id)
+	mage.res_regen = 0.0
+	mage.res = 10.0
+	sim.step(0.05)
+	_check("AI 缺资源且唤醒等于10%时既不施法也不追", mage.pos == Vector2(300, 475)
+		and mage.res == 10.0 and _count(sim.events, "ai_skill_cast", {"skill_id": "evocation"}) == 0)
+	mage.res = 9.9
+	sim.set_ally_aim_actor(mage.id)
+	sim.step(0.05)
+	_check("AI 瞄准期保留唤醒和走位", mage.res == 9.9 and mage.pos == Vector2(300, 475))
+	sim.set_ally_aim_actor(-1)
+	controller.submit_player_skill("w", Vector2.ZERO, false)
+	sim.step(0.05)
+	_check("AI 手动失败占用该角色下一步", mage.res == 9.9)
+	sim.step(0.05)
+	_check("AI 严格低于10%按旧唤醒资源规则恢复", mage.res > 10.0
+		and _count(sim.events, "ai_skill_cast", {"skill_id": "evocation"}) == 1)
+	for step in 24:
+		sim.step(0.05)
+	var distance := mage.pos.distance_to(target.pos)
+	_check("AI 法师在可施法距离停住，保留远于普攻的距离", distance <= 450.0 and distance > mage.attack_range
+		and mage.damage_done > 0 and mage.auto_target_id == target.id)
+	controller.player_right_click(Vector2(380, 680))
+	sim.step(0.05)
+	_check("AI 手动移动保留持续攻击目标", mage.order_kind == "move" and mage.auto_target_id == target.id)
+
+
+## 依次验证危急可达、坦克优先、出圈停步及场边的确定性备选方向。
+func _ally_ai_support_cases() -> void:
+	var made := _ally_ai_fixture()
+	var sim: BattleSim = made["sim"]
+	var tank := sim.slot_unit(0)
+	var rogue := sim.slot_unit(1)
+	var mage := sim.slot_unit(2)
+	var priest := sim.slot_unit(3)
+	tank.hp = tank.max_hp * 0.65
+	mage.hp = mage.max_hp * 0.18
+	mage.pos = Vector2(1580, 900)
+	rogue.hp = rogue.max_hp * 0.24
+	var rogue_hp := rogue.hp
+	sim.step(0.05)
+	_check("AI 可达危急队友先于远端危急和战士", rogue.hp > rogue_hp and mage.hp == mage.max_hp * 0.18)
+	mage.hp = mage.max_hp
+	rogue.hp = rogue.max_hp * 0.40
+	priest.cd_until.clear()
+	priest.gcd_until = 0.0
+	priest.next_attack_at = INF
+	var tank_hp := tank.hp
+	sim.step(0.05)
+	_check("AI 无危急时战士先于较低血量的普通队友", tank.hp > tank_hp)
+
+	var target: BattleSim.Unit = sim.living("enemy")[0]
+	tank.pos = Vector2(42, 280)
+	target.pos = Vector2(52, 280)
+	target.cast = {"radius": 150.0, "center": target.pos, "ends_at": sim.time + 15.0}
+	sim.issue_player_target(tank, target)
+	for step in 32:
+		sim.step(0.05)
+	var safe := tank.pos
+	_check("AI 场边有替代路线，退出实际命中半径", safe.distance_to(target.pos) > 150.0 + tank.radius
+		and tank.auto_target_id == target.id)
+	for step in 12:
+		sim.step(0.05)
+	_check("AI 出圈后预警仍在时不折返", tank.pos.distance_to(target.pos) > 150.0 + tank.radius and tank.damage_done == 0.0)
+	target.cast.clear()
+	for step in 20:
+		sim.step(0.05)
+	_check("AI 震地结束后恢复原攻击", tank.pos.distance_to(target.pos) <= tank.attack_range and tank.damage_done > 0.0)
+
+
+## 同一模拟器验证显式普攻、治疗支援、选目标循环与战士仇恨。
+func _player_control_cases() -> void:
+	var made := _make(["warrior", "rogue", "mage", "priest"], 121, {"crit_chance": 0.0})
+	var sim: BattleSim = made["sim"]
+	var controller: BattleController = made["controller"]
+	sim.player_controls = true
+	var allies := sim.living("ally")
+	var enemies := sim.living("enemy")
+	var warrior: BattleSim.Unit = allies[0]
+	var rogue: BattleSim.Unit = allies[1]
+	var mage: BattleSim.Unit = allies[2]
+	var priest: BattleSim.Unit = allies[3]
+	var first: BattleSim.Unit = enemies[0]
+	var second: BattleSim.Unit = enemies[1]
+	warrior.pos = Vector2(600, 400)
+	first.pos = Vector2(660, 400)
+	second.pos = Vector2(800, 400)
+	for foe in enemies:
+		foe.speed = 0
+		foe.next_attack_at = 1000
+		foe.cast_cd_until = 1000
+	var before := first.hp
+	controller.select_target(first.id)
+	sim.step(0.05)
+	_check("真人左键／观察目标不启动普攻", first.hp == before and warrior.auto_target_id == -1)
+	controller.player_right_click(first.pos, first.id)
+	controller.select_target(second.id)
+	sim.step(0.05)
+	_check("真人普攻与观察目标独立", first.hp < before and warrior.auto_target_id == first.id and warrior.selected_target_id == second.id)
+	controller.player_right_click(Vector2(500, 400))
+	before = first.hp
+	warrior.next_attack_at = 0
+	sim.step(0.05)
+	_check("真人走位中保留目标并暂停普攻", first.hp == before and warrior.order_kind == "move" and warrior.auto_target_id == first.id and warrior.selected_target_id == second.id)
+	warrior.order_kind = "none"
+	warrior.pos = Vector2(580, 400)
+	sim.step(0.05)
+	_check("真人超距不自动追击", warrior.pos == Vector2(580, 400) and first.hp == before)
+	warrior.pos = Vector2(600, 400)
+	controller.select_target(first.id)
+	var threat := float(first.threat.get(warrior.id, 0.0))
+	warrior.res = 100.0
+	_check("真人战士猛击使用选中敌人", controller.submit_player_skill("q", Vector2.ZERO, false))
+	var dealt := before - first.hp
+	_check("猛击只对本目标追加 50% 仇恨", dealt > 0 and is_equal_approx(float(first.threat[warrior.id]) - threat, dealt * 4.5))
+	first.threat[rogue.id] = 1000.0
+	# 走到真实冷却校验之外，之后只让模拟器推进状态和实际敌方选择。
+	sim.time = 2.0
+	warrior.next_attack_at = 1000.0
+	_check("战士嘲讽补足 10% 并接回仇恨", controller.submit_player_skill("w", Vector2.ZERO, false) and first.threat[warrior.id] == 1100.0)
+	var expiry := float(first.statuses["taunt"]["until"])
+	sim.step(0.05)
+	_check("嘲讽期间实际攻击战士", first.target_id == warrior.id)
+	sim.time = expiry
+	sim.step(0.05)
+	_check("嘲讽到期后继续按仇恨攻击战士", not first.statuses.has("taunt") and first.target_id == warrior.id)
+	first.threat[rogue.id] = 1300.0
+	sim.step(0.05)
+	_check("持续爆发仍可 OT，模型实际对象随之更新", first.target_id == rogue.id)
+	controller.select_slot(mage.slot)
+	mage.pos = Vector2(500, 400)
+	mage.res = 100.0
+	_check("战士与法师各自保留观察目标", controller.target_for(mage) == null and warrior.selected_target_id == first.id)
+	_check("无敌方选择的爆破接受战场落点", controller.submit_player_skill("q", second.pos, true) and mage.auto_target_id == second.id and mage.damage_done > 0)
+	mage.cd_until.clear()
+	mage.gcd_until = 0.0
+	var mana := mage.res
+	var damage := mage.damage_done
+	_check("旧路径有效空放消耗且不重选普攻对象", controller.submit_player_skill("q", Vector2(490, 550), true) and mage.res < mana and mage.damage_done == damage and mage.auto_target_id == second.id)
+	controller.preferences["tab_health"] = true
+	first.hp = 1
+	second.hp = 2
+	enemies[2].hp = 3
+	enemies[3].hp = 4
+	controller.cycle_target()
+	_check("Tab 本轮优先最低当前生命", mage.selected_target_id == first.id)
+	enemies[3].hp = 0.5
+	controller.select_target(enemies[3].id)
+	controller.cycle_target()
+	_check("循环中途换血量和鼠标选择均不重排", mage.selected_target_id == second.id)
+	enemies[2].alive = false
+	controller.cycle_target()
+	_check("循环跳过离场敌人并保持剩余顺序", mage.selected_target_id == enemies[3].id)
+	controller.cycle_target()
+	_check("下一轮按最新血量重新排序", mage.selected_target_id == enemies[3].id)
+	controller.select_slot(priest.slot)
+	priest.pos = Vector2(580, 414)
+	warrior.hp -= 14.0
+	controller.select_target(warrior.id)
+	_check("牧师有效治疗预览只读缺血", sim.player_heal_preview(priest, warrior) == 14.0 and warrior.hp == warrior.max_hp - 14.0)
+	priest.next_attack_at = 0
+	sim.step(0.05)
+	_check("牧师无需右键也能自动支援", warrior.hp == warrior.max_hp and sim.player_heal_preview(priest, warrior) == 0.0)
+
+
+## 真人出征按实际交战均分治疗，换目标遵循阈值、读条锁定和死亡重选。
+func _player_threat_cases() -> void:
+	# 牧师 t2 的强效治疗足以将 100 缺血补满，验证以实得量而非技能面值计仇恨。
+	var config := BattleConfig.load_config({"talents": {"priest": "t2"}})
+	config["crit_chance"] = 0.0
+	var made := _make(["warrior", "rogue", "mage", "priest"], 121, config)
+	var sim: BattleSim = made["sim"]
+	var controller: BattleController = made["controller"]
+	sim.player_controls = true
+	var tank := sim.slot_unit(0)
+	var rogue := sim.slot_unit(1)
+	var mage := sim.slot_unit(2)
+	var priest := sim.slot_unit(3)
+	var foes := sim.living("enemy")
+	var first := foes[0]
+	var second := foes[1]
+	var caster := foes[2]
+	var untouched := foes[3]
+	tank.pos = Vector2(600, 400)
+	priest.pos = Vector2(500, 400)
+	first.pos = Vector2(660, 400)
+	second.pos = Vector2(600, 490)
+	caster.pos = Vector2(850, 400)
+	for foe in foes:
+		foe.speed = 0.0
+		foe.next_attack_at = INF
+		foe.cast_cd_until = INF
+	tank.next_attack_at = INF
+	priest.next_attack_at = INF
+	controller.select_slot(tank.slot)
+	_check("交战治疗夹具：旋风斩命中两只近战", controller.submit_player_skill("e", Vector2.ZERO, false)
+		and first.engaged_allies.has(tank.id) and second.engaged_allies.has(tank.id) and not untouched.activated)
+	controller.select_slot(priest.slot)
+	controller.select_target(tank.id)
+	tank.hp -= 100.0
+	var healed := controller.submit_player_skill("q", Vector2.ZERO, false)
+	_check("真人治疗：实际回100血，两只交战敌人各10仇恨", healed and tank.hp == tank.max_hp
+		and is_equal_approx(float(first.threat.get(priest.id, 0.0)), 10.0) and is_equal_approx(float(second.threat.get(priest.id, 0.0)), 10.0)
+		and first.engaged_allies.has(priest.id) and second.engaged_allies.has(priest.id)
+		and not caster.threat.has(priest.id) and not untouched.threat.has(priest.id),
+		"accepted=%s hp=%s/%s threat=%s/%s/%s/%s" % [healed, tank.hp, tank.max_hp, first.threat, second.threat, caster.threat, untouched.threat])
+	sim._heal(priest, tank, 100.0, "")
+	mage.hp -= 20.0
+	sim._heal(priest, mage, 20.0, "")
+	_check("真人治疗：满血和未交战队友均无额外仇恨", first.threat.get(priest.id) == 10.0
+		and second.threat.get(priest.id) == 10.0 and untouched.threat.is_empty())
+	tank.hp -= 14.0
+	priest.next_attack_at = 0.0
+	sim.step(0.05)
+	_check("真人普疗：实际回14血，交战敌人分别增加1.4", tank.hp == tank.max_hp
+		and is_equal_approx(float(first.threat.get(priest.id)), 11.4)
+		and is_equal_approx(float(second.threat.get(priest.id)), 11.4) and untouched.threat.is_empty())
+	first.threat[tank.id] = 100.0
+	first.threat[mage.id] = 110.0
+	sim.step(0.05)
+	_check("真人换目标：等于110%仍打战士", first.target_id == tank.id)
+	first.threat[mage.id] = 111.0
+	sim.step(0.05)
+	_check("真人换目标：严格超过110%时转火", first.target_id == mage.id)
+
+	# 让施法怪自然开始读条，然后用仇恨变化验证读条锁定和后续转火。
+	caster.threat[tank.id] = 100.0
+	caster.cast_cd_until = sim.time
+	sim.step(0.05)
+	caster.threat[mage.id] = 111.0
+	var before := tank.hp
+	var mage_before := mage.hp
+	sim.step(0.05)
+	_check("真人换目标：读条开始后保留原目标", caster.target_id == tank.id and caster.cast.get("target_id") == tank.id)
+	var cast_end := float(caster.cast.get("ends_at", sim.time))
+	while sim.time <= cast_end:
+		sim.step(0.05)
+	_check("真人读条命中原目标并登记敌方发起的交战", tank.hp < before and mage.hp == mage_before
+		and caster.engaged_allies.has(tank.id))
+	sim.step(0.05)
+	_check("真人读条结束后按仇恨转火", caster.target_id == mage.id)
+
+	sim._down(mage, first.id)
+	first.threat[tank.id] = 100.0
+	first.threat[rogue.id] = 100.0
+	sim.step(0.05)
+	_check("真人换目标：当前目标死亡，同仇恨选较小ID", first.target_id == tank.id and not first.threat.has(mage.id))
+	sim._down(second, tank.id)
+	_check("真人敌人死亡清除自身交战与仇恨", not second.activated and second.engaged_allies.is_empty() and second.threat.is_empty())
+	sim._finish("lose", "test")
+	_check("真人战斗结束清除交战仇恨", first.engaged_allies.is_empty() and first.threat.is_empty())
+
+
+## 用实际四人配表测试一次旋风斩承接两轮法师技能，并单独记录开启普攻时的表现。
+func _player_whirlwind_case(primary_index: int, natural_attacks: bool) -> void:
+	var config := BattleConfig.load_config({"talents": {"mage": "t1", "priest": "t2"}, "sets": ["mage"]})
+	if not natural_attacks:
+		config["crit_chance"] = 0.0
+	var made := _make(["warrior", "rogue", "mage", "priest"], 121, config)
+	var sim: BattleSim = made["sim"]
+	var controller: BattleController = made["controller"]
+	sim.player_controls = true
+	var tank := sim.slot_unit(0)
+	var mage := sim.slot_unit(2)
+	var priest := sim.slot_unit(3)
+	var foes := sim.living("enemy")
+	var primary := foes[primary_index]
+	var companion := foes[1]
+	var label := "旋风斩四人/%s/%s" % [primary.kind, "开放普攻" if natural_attacks else "仅技能"]
+	tank.pos = Vector2(600, 400)
+	sim.slot_unit(1).pos = Vector2(500, 600)
+	mage.pos = Vector2(735, 400)
+	priest.pos = Vector2(480, 400)
+	for foe in foes:
+		# 固定聚怪位置，用真实敌方选目标推进，冻结攻击和读条以观察每次转火。
+		foe.pos = Vector2(1400, 300 + 180 * (foe.id - foes[0].id))
+		foe.speed = 0.0
+		foe.next_attack_at = INF
+		foe.cast_cd_until = INF
+	primary.pos = Vector2(660, 400)
+	companion.pos = Vector2(600, 490)
+	if not natural_attacks:
+		tank.next_attack_at = INF
+		mage.next_attack_at = INF
+	controller.select_slot(tank.slot)
+	controller.select_target(primary.id)
+	var primary_before := primary.hp
+	var companion_before := companion.hp
+	var opened := controller.submit_player_skill("e", Vector2.ZERO, false)
+	var opened_threat := float(primary.threat.get(tank.id, 0.0))
+	_check(label + " 旋风斩对每只命中怪应用技能仇恨倍率", opened
+		and is_equal_approx(opened_threat, (primary_before - primary.hp) * 10.5)
+		and is_equal_approx(float(companion.threat.get(tank.id, 0.0)), (companion_before - companion.hp) * 10.5))
+	sim.step(0.05)
+	_check(label + " 两只怪由战士开怪", opened and primary.target_id == tank.id and companion.target_id == tank.id)
+
+	# 验收用例固定法师四发全部暴击；开放普攻用例沿用配表暴击率。
+	if not natural_attacks:
+		sim.config["crit_chance"] = 1.0
+	var first_ot := ""
+	for index in range(4):
+		var key := "q" if index % 2 == 0 else "w"
+		var ready_at := maxf(mage.gcd_until, float(mage.cd_until.get(key, 0.0)))
+		while sim.time < ready_at:
+			sim.step(0.05)
+			if first_ot.is_empty() and (primary.target_id != tank.id or companion.target_id != tank.id):
+				first_ot = "第%d发前 t=%.2f 主怪目标=%d 旁怪目标=%d 主怪仇恨=%s" % [index + 1, sim.time, primary.target_id, companion.target_id, primary.threat]
+		controller.select_slot(mage.slot)
+		controller.select_target(primary.id)
+		var mage_before := float(primary.threat.get(mage.id, 0.0))
+		var hp_before := primary.hp
+		var cast := controller.submit_player_skill(key, Vector2.ZERO, false)
+		var mage_after := float(primary.threat.get(mage.id, 0.0))
+		var damage := hp_before - primary.hp
+		sim.step(0.05)
+		if first_ot.is_empty() and (primary.target_id != tank.id or companion.target_id != tank.id):
+			first_ot = "第%d发%s后 t=%.2f 主怪目标=%d 旁怪目标=%d 主怪仇恨=%s" % [index + 1, key.to_upper(), sim.time, primary.target_id, companion.target_id, primary.threat]
+		var held := primary.target_id == tank.id and companion.target_id == tank.id
+		var detail := "t=%.2f 主怪目标=%d 战士=%.2f 法师=%.2f 旁怪目标=%d" % [sim.time, primary.target_id,
+			float(primary.threat.get(tank.id, 0.0)), float(primary.threat.get(mage.id, 0.0)), companion.target_id]
+		_check(label + " 第%d发%s" % [index + 1, key.to_upper()], cast and damage > 0.0
+			and is_equal_approx(mage_after - mage_before, damage)
+			and (natural_attacks or held), detail)
+		if index == 0:
+			tank.hp -= 100.0
+			controller.select_slot(priest.slot)
+			controller.select_target(tank.id)
+			var healed := controller.submit_player_skill("q", Vector2.ZERO, false)
+			_check(label + " 牧师有效治疗各记10仇恨", healed and tank.hp == tank.max_hp
+				and is_equal_approx(float(primary.threat.get(priest.id, 0.0)), 10.0)
+				and is_equal_approx(float(companion.threat.get(priest.id, 0.0)), 10.0),
+				"accepted=%s hp=%s/%s threat=%s/%s" % [healed, tank.hp, tank.max_hp, primary.threat, companion.threat])
+	var untouched := true
+	for foe in foes:
+		if foe != primary and foe != companion:
+			untouched = untouched and not foe.activated and foe.threat.is_empty()
+	_check(label + " 圈外怪没有受到旋风斩或治疗仇恨", untouched)
+	print("THREAT_RUN ", label, " E=", opened_threat, " first_ot=", first_ot if not first_ot.is_empty() else "无",
+		" final_primary=", primary.threat, " final_companion=", companion.threat)
 
 
 func _check(name: String, ok: bool, detail: String = "") -> void:
@@ -506,6 +992,16 @@ func _s1a_effect_resource_cases() -> void:
 	_check("R1同路径合法对照完整加载且目录通过", control_ok, control_path + ": " + "; ".join(control_catalog["problems"]))
 	if not control_ok:
 		return
+	# 导出使用二进制资源，显式 false 往返后仍须与漏填的空哨兵区分。
+	var source: Resource = ResourceLoader.load(control_path)
+	var binary_path := directory.path_join("control_binary.res")
+	var saved := ResourceSaver.save(source, binary_path)
+	var binary: Resource = ResourceLoader.load(binary_path) if saved == OK else null
+	var preserves_flags: bool = binary is BattleConfig.SkillDef and binary.effects.size() == 1
+	if preserves_flags:
+		var saved_effect: Resource = binary.effects[0]
+		preserves_flags = saved_effect.uses_stable_crit == true and saved_effect.uses_mastery == false
+	_check("二进制资源往返保留显式 true 和 false", preserves_flags, error_string(saved))
 	# 普通 Resource、挂错脚本的 Resource 和 null，均测试单独及与合法效果混合的列表。
 	for wrong_kind: String in ["plain", "wrong_script", "null"]:
 		for mixed: bool in [false, true]:

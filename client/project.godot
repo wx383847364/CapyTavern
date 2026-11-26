@@ -85,6 +85,27 @@ pause={
 ]
 }
 
+battle_slot_1={
+"deadzone": 0.2,
+"events": [Object(InputEventKey,"physical_keycode":4194332)]
+}
+battle_slot_2={
+"deadzone": 0.2,
+"events": [Object(InputEventKey,"physical_keycode":4194333)]
+}
+battle_slot_3={
+"deadzone": 0.2,
+"events": [Object(InputEventKey,"physical_keycode":4194334)]
+}
+battle_slot_4={
+"deadzone": 0.2,
+"events": [Object(InputEventKey,"physical_keycode":4194335)]
+}
+battle_cycle_target={
+"deadzone": 0.2,
+"events": [Object(InputEventKey,"physical_keycode":4194306)]
+}
+
 [rendering]
 
 textures/vram_compression/import_etc2_astc=true

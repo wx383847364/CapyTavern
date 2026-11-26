@@ -47,6 +47,10 @@ var _skill_validation_speed: int = 1
 var _skill_lifecycle_started: bool = false
 ## 仅存执行结果的独立数据；与 controller.last_input 的入队诊断分开。
 var last_cast_result: Dictionary = {}
+var _settings_open: bool = false
+var _aim_key: String = ""
+var _aim_from_button: bool = false
+var _pointer: Vector2 = Vector2.ZERO
 
 
 ## 隔离实例保留非正式生命周期；酒馆正式战斗领取预检实例，再进入原日志、服务和自动战斗。
@@ -96,9 +100,16 @@ func _ready() -> void:
 		push_error("战斗输入绑定失败")
 		get_tree().quit(2)
 		return
+	sim.player_controls = not BattleLaunch.autoplay
+	sim.ally_ai_enabled = sim.player_controls
+	if sim.player_controls:
+		controller.load_preferences()
+		_pointer = get_local_mouse_position()
 	if use_formal:
 		events.cast_resolved.connect(_on_formal_cast)
 		sim.publish_formal_start()
+	if sim.player_controls:
+		events.damage_dealt.connect(_on_damage_dealt)
 	events.command_rejected.connect(_on_rejected)
 	events.battle_ended.connect(_on_ended)
 	if BattleLaunch.from_tavern:
@@ -168,7 +179,28 @@ func _refresh_view(final_frame: bool = false) -> void:
 	var text := _toast
 	if sim.formal_skill_sortie and not _skill_result_notice.is_empty():
 		text = _skill_result_notice
-	_view.call("render", sim.snapshot(), controller.selected_slot, text, ProjectSettings.globalize_path(LOG_PATH))
+	var frame := sim.snapshot()
+	if sim.player_controls:
+		var actor := controller.selected_unit()
+		var target := controller.target_for(actor)
+		var aim := controller.aim_view(_aim_key, _pointer, _pointer_is_ground()) if not _aim_key.is_empty() else {}
+		frame["player_hud"] = {"target": target.id if target != null else -1,
+			"heal_preview": sim.player_heal_preview(actor, target),
+			"prefs": controller.preferences, "settings": _settings_open, "aim": aim}
+	_view.call("render", frame, controller.selected_slot, text, ProjectSettings.globalize_path(LOG_PATH))
+
+
+## 从已结算的普攻和旧技能伤害触发反馈，只接收友方对怪物的扣血。
+func _on_damage_dealt(source_id: int, target_id: int, amount: int, _skill_id: String, critical: bool, _hp_after: int) -> void:
+	if _leaving or sim.paused or sim.finished:
+		return
+	var source: BattleSim.Unit = sim.units.get(source_id)
+	var target: BattleSim.Unit = sim.units.get(target_id)
+	if source == null or source.side != "ally" or target == null or target.side != "enemy":
+		return
+	# 正式普攻的旧事件会舍入伤害，最后不足半点的扣血仍是致死命中。
+	if amount > 0 or (amount == 0 and target.alive and target.hp == 0.0):
+		_view.call("show_enemy_hit", target_id, critical)
 
 
 ## 新的正式普通命令拒绝取代上次技能提示；旧战斗和隔离继续使用原反馈。
@@ -192,6 +224,9 @@ func _on_ended(result: String, reason: String, elapsed: float) -> void:
 		_refresh_view(true)
 		_close_skill_validation()
 		return
+	_view.call("clear_enemy_hits")
+	_cancel_aim()
+	_settings_open = false
 	_result = result
 	events.close_log()
 	print("BATTLE_RESULT result=%s reason=%s elapsed=%.2f log=%s" % [result, reason, elapsed, ProjectSettings.globalize_path(LOG_PATH)])
@@ -212,7 +247,7 @@ func _on_ended(result: String, reason: String, elapsed: float) -> void:
 			get_tree().quit(0)
 
 
-## 键盘与真实点击沿用原分发；隔离模式先拒绝失效绑定，echo/释放均不生成请求。
+## 战斗先分流真人输入与隔离入口；重复按键不产生请求，真人瞄准可接收释放。
 func _unhandled_input(event: InputEvent) -> void:
 	if _skill_validation_mode and not _skill_validation_current():
 		_close_skill_validation()
@@ -226,6 +261,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			_back_to_main()
 		elif event.is_action_pressed("click_primary") and _view.call("hit_test", _event_pos(event)).get("kind", "") == "back":
 			_back_to_main()
+		return
+	if sim.player_controls:
+		_player_input(event)
 		return
 	if event.is_action_pressed("click_primary"):
 		_on_click(_event_pos(event), false)
@@ -272,6 +310,9 @@ func _on_click(pos: Vector2, secondary: bool) -> void:
 func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 	if _leaving or sim == null or (_skill_validation_mode and not _skill_validation_current()):
 		return
+	if sim.player_controls:
+		_player_click(hit, pos, secondary)
+		return
 	if hit.is_empty():
 		var previous_input := controller.last_input
 		if secondary:
@@ -292,6 +333,138 @@ func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 			controller.select_slot(int(hit["slot"]))
 		"skill":
 			_submit_skill(String(hit["key"]))
+
+
+## 实战输入先经过设置与瞄准状态，再把角色切换和施法交还控制器。
+func _player_input(event: InputEvent) -> void:
+	if event is InputEventMouse:
+		_pointer = _event_pos(event)
+		if event.is_action_pressed("click_primary") or event.is_action_pressed("click_secondary"):
+			_on_click(_pointer, event.is_action_pressed("click_secondary"))
+			_refresh_view()
+		return
+	if not (event is InputEventKey or event is InputEventAction):
+		return
+	if event.is_action_pressed("cancel_layer"):
+		_settings_open = false
+		_cancel_aim()
+	elif _settings_open:
+		return
+	elif event.is_action_pressed("pause"):
+		_cancel_aim()
+		controller.toggle_pause()
+	elif event.is_action_pressed("battle_cycle_target"):
+		controller.cycle_target()
+	else:
+		for index in SLOT_ACTIONS.size():
+			if event.is_action_pressed(SLOT_ACTIONS[index]) or event.is_action_pressed("battle_slot_%d" % (index + 1)):
+				var previous := controller.selected_slot
+				controller.select_slot(index)
+				if previous != controller.selected_slot:
+					_cancel_aim()
+				break
+		for action: String in SKILL_ACTIONS:
+			var key := String(SKILL_ACTIONS[action])
+			if event.is_action_pressed(action):
+				if sim.paused or not controller.preferences["release_cast"]:
+					_player_cast(key)
+				elif _aim_key.is_empty():
+					_begin_aim(key, false)
+			elif event.is_action_released(action) and key == _aim_key and not _aim_from_button:
+				_cancel_aim()
+				_player_cast(key)
+	_refresh_view()
+
+
+## 地面瞄准允许覆盖场上单位，界面和留白会截断落点。
+func _pointer_is_ground() -> bool:
+	var hit: Dictionary = _view.call("hit_test", _pointer)
+	return hit.is_empty() or hit.get("kind") == "world_target"
+
+
+## 按键和地面按钮共用同一个角色瞄准锁。
+func _begin_aim(key: String, from_button: bool) -> void:
+	var actor := controller.selected_unit()
+	if actor == null or not actor.alive:
+		return
+	_aim_key = key
+	_aim_from_button = from_button
+	sim.set_ally_aim_actor(actor.id)
+
+
+## 取消后不再认领按键抬起，也不复用技能栏进入的等待落点。
+func _cancel_aim() -> void:
+	_aim_key = ""
+	_aim_from_button = false
+	if sim != null:
+		sim.set_ally_aim_actor(-1)
+
+
+## 将绘制命中化为选目标、移动、打开设置或一次技能确认，模态界面消费全部点击。
+func _player_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
+	_pointer = pos
+	var kind := String(hit.get("kind", ""))
+	if _settings_open:
+		if not secondary and kind == "settings_close":
+			_settings_open = false
+		elif not secondary and kind == "preference":
+			if not controller.toggle_preference(hit["key"]):
+				_toast = "设置保存失败"
+				_toast_until_ms = Time.get_ticks_msec() + 1500
+		return
+	if not secondary and kind == "settings":
+		_cancel_aim()
+		sim.set_paused(true)
+		_settings_open = true
+		return
+	if _aim_from_button:
+		if secondary:
+			_cancel_aim()
+		elif kind in ["", "world_target"]:
+			var key := _aim_key
+			_cancel_aim()
+			_player_cast(key)
+		return
+	if secondary:
+		if kind in ["", "world_target"]:
+			var previous := controller.last_input
+			controller.player_right_click(pos, int(hit.get("id", -1)))
+			if sim.formal_skill_sortie and not is_same(previous, controller.last_input) and not controller.last_input.get("queued", false):
+				_on_rejected(controller.selected_unit().id, kind, controller.last_input["reason"])
+			elif sim.formal_skill_sortie and not is_same(previous, controller.last_input):
+				_skill_result_notice = ""
+		return
+	match kind:
+		"world_target", "target":
+			controller.select_target(int(hit.get("id", -1)))
+		"skill":
+			var key: String = hit["key"]
+			if not sim.paused and controller.aim_view(key, pos, false).get("ground", false):
+				_begin_aim(key, true)
+			else:
+				_cancel_aim()
+				_player_cast(key)
+
+
+## 正式结果仍由事件确认；旧地面范围技能通过本次实际统计变化提示空放。
+func _player_cast(key: String) -> void:
+	var actor := controller.selected_unit()
+	if sim.paused:
+		if actor != null:
+			_on_rejected(actor.id, "skill", "paused")
+		return
+	var on_ground := _pointer_is_ground()
+	var aim := controller.aim_view(key, _pointer, on_ground)
+	var before := actor.damage_done if actor != null else 0.0
+	var queued := controller.submit_player_skill(key, _pointer, on_ground)
+	if sim.formal_skill_sortie:
+		_toast = ""
+		_skill_result_notice = "技能已入队" if queued else "输入拒绝：" + String(_view.call("reason_text", controller.last_input.get("reason", "无角色")))
+	elif not queued and actor != null:
+		_on_rejected(actor.id, "skill", controller.last_input.get("reason", "no_target"))
+	elif aim.get("ground", false) and actor != null and actor.damage_done == before:
+		_toast = "烈焰爆破：未命中"
+		_toast_until_ms = Time.get_ticks_msec() + 1500
 
 
 ## 键钮共用一个入口，正式技能提交提示替换更旧的普通命令提示，实际效果等执行事件。
@@ -321,15 +494,21 @@ func _notification(what: int) -> void:
 		return
 	# 失去焦点：战斗暂停，回来后等玩家自己按 P 继续。
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and sim != null:
+		_cancel_aim()
 		sim.set_paused(true)
-	elif what == NOTIFICATION_EXIT_TREE and sim != null and sim.formal_skill_sortie:
-		# 离场时断开本场订阅并清理盾、关系和排队请求。
-		if events.cast_resolved.is_connected(_on_formal_cast):
-			events.cast_resolved.disconnect(_on_formal_cast)
-		if controller != null:
-			controller.release_skill_validation()
-		sim._leave_skill_schedule()
-		events.close_log()
+	elif what == NOTIFICATION_EXIT_TREE and sim != null:
+		if events.damage_dealt.is_connected(_on_damage_dealt):
+			events.damage_dealt.disconnect(_on_damage_dealt)
+		if is_instance_valid(_view):
+			_view.call("clear_enemy_hits")
+		if sim.formal_skill_sortie:
+			# 正式场额外解绑事务，清理盾、关系和排队请求。
+			if events.cast_resolved.is_connected(_on_formal_cast):
+				events.cast_resolved.disconnect(_on_formal_cast)
+			if controller != null:
+				controller.release_skill_validation()
+			sim._leave_skill_schedule()
+			events.close_log()
 
 
 ## 结算写进存档（P2b 的 settle）。选中的战斗角色只记 selectedSlot，不会变成队长。
@@ -453,13 +632,22 @@ func _on_validation_cast(resolved: Dictionary) -> void:
 	_refresh_view()
 
 
-## 正式场只显示本场技能事务的实际结果，覆盖更早的普通命令拒绝。
+## 正式场显示本场事务结果，并按实际扣血目标播放命中反馈。
 func _on_formal_cast(resolved: Dictionary) -> void:
 	if _leaving or resolved.get("battle_id") != sim.skill_battle_id:
+		return
+	if resolved.get("source") == "ai":
+		if sim.result == "error":
+			_view.call("set_notice", "战斗配置异常，本次未结算")
 		return
 	last_cast_result = resolved.duplicate(true)
 	_skill_result_notice = _full_skill_result_text(resolved)
 	_toast = ""
+	if sim.player_controls and resolved.get("accepted", false):
+		# 正式技能用期望暴击倍率，没有单次暴击标记；每个正伤害明细只触发闪白。
+		for effect: Dictionary in resolved["details"].get("effects", []):
+			if effect["effect_kind"] == "MAGIC_DAMAGE" and effect["actual_amount"] > 0.0:
+				_view.call("show_enemy_hit", effect["target_id"], false)
 	if resolved.get("reason") == "CONFIG_ERROR" and sim.result == "error":
 		_view.call("set_notice", "战斗配置异常，本次未结算")
 	_refresh_view()
@@ -501,7 +689,7 @@ func _full_skill_result_text(resolved: Dictionary) -> String:
 	match skill_id:
 		"mage.fire.fireball", "mage.fire.flame_burst":
 			if skill_id == "mage.fire.flame_burst":
-				outcome = "%d 个目标，" % effects.size()
+				outcome = "未命中，" if effects.is_empty() else "%d 个目标，" % effects.size()
 			outcome += "有效伤害 %s，吸收 %s，过量 %s" % [amount, BattleViewScript.skill_amount_text(absorbed), BattleViewScript.skill_amount_text(excess)]
 		"mage.fire.flame_barrier":
 			var action := String(effects[0]["shield_action"])

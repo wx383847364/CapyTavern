@@ -13,6 +13,16 @@ const SKILL_H := 96.0
 const SKILL_GAP := 12.0
 const SKILL_Y := 962.0
 const BACK_BUTTON := Rect2(830, 650, 260, 70)
+const TARGET_BAR := Rect2(615, 118, 578, 59)
+const TARGET_OF_TARGET_BAR := Rect2(1205, 122, 284, 51)
+const OUTPUT_PANEL := Rect2(1503, 111, 194, 178)
+const THREAT_PANEL := Rect2(1707, 111, 197, 178)
+const SETTINGS_BUTTON := Rect2(24, 111, 108, 40)
+const SETTINGS_PANEL := Rect2(658, 331, 604, 382)
+const SETTINGS_CLOSE := Rect2(1101, 644, 125, 40)
+const SETTINGS_OPTIONS := ["names", "release_cast", "tab_health"]
+const HIT_FLASH_MS := 100
+const CRITICAL_RING_MS := 150
 
 const REASON_TEXT := {
 	"no_target": "没有目标",
@@ -42,6 +52,9 @@ const RESULT_REASON := {
 }
 
 var _snap: Dictionary = {}
+var _by_id: Dictionary = {}
+var _hud: Dictionary = {}
+var _enemy_hits: Dictionary = {}
 var _selected_slot: int = -1
 var _back_text: String = "返回（Enter）"
 var _notice: String = ""
@@ -49,12 +62,40 @@ var _toast: String = ""
 var _font: Font = preload("res://scenes/ui/cjk_font.gd").get_font()
 
 
-## 接收独立纯数据副本；保留旧日志路径入参但不缓存路径，不持有模拟器或角色对象。
+## 接收纯数据副本，并按真实显示时间清理已过期或离场的命中反馈。
 func render(snapshot: Dictionary, selected_slot: int, toast: String, _log_path: String) -> void:
 	_snap = snapshot.duplicate(true)
+	_hud = _snap.get("player_hud", {})
+	_by_id.clear()
+	for unit: Dictionary in _snap["units"]:
+		_by_id[unit["id"]] = unit
+	if _snap["paused"] or _snap["finished"]:
+		clear_enemy_hits()
+	elif not _enemy_hits.is_empty():
+		var now := Time.get_ticks_msec()
+		for target_id: int in _enemy_hits.keys():
+			var hit: Dictionary = _enemy_hits[target_id]
+			if not _by_id.has(target_id) or (now - hit["flash_at"] >= HIT_FLASH_MS and now - hit["critical_at"] >= CRITICAL_RING_MS):
+				_enemy_hits.erase(target_id)
 	_selected_slot = selected_slot
 	_toast = toast
 	queue_redraw()
+
+
+## 每只怪只刷新一次闪白计时，尚在扩散的暴击环合并后续暴击。
+func show_enemy_hit(target_id: int, critical: bool) -> void:
+	var now := Time.get_ticks_msec()
+	var hit: Dictionary = _enemy_hits.get(target_id, {"critical_at": now - CRITICAL_RING_MS})
+	hit["flash_at"] = now
+	if critical and now - hit["critical_at"] >= CRITICAL_RING_MS:
+		hit["critical_at"] = now
+	_enemy_hits[target_id] = hit
+	queue_redraw()
+
+
+## 暂停、结算或离场后丢弃本场瞬时画面。
+func clear_enemy_hits() -> void:
+	_enemy_hits.clear()
 
 
 ## 出征进来的战斗：返回按钮写「回酒馆」。结果页底部的提示（如保存失败）用 set_notice。
@@ -85,9 +126,19 @@ func hit_test(pos: Vector2) -> Dictionary:
 		return {}
 	if bool(_snap["finished"]):
 		return {"kind": "back"} if BACK_BUTTON.has_point(pos) else {"kind": "hud"}
+	if _hud.get("settings", false):
+		for index in SETTINGS_OPTIONS.size():
+			if _option_rect(index).has_point(pos):
+				return {"kind": "preference", "key": SETTINGS_OPTIONS[index]}
+		return {"kind": "settings_close"} if SETTINGS_CLOSE.has_point(pos) else {"kind": "hud"}
 	for slot_index in 4:
 		if _portrait_rect(slot_index).has_point(pos):
-			return {"kind": "portrait", "slot": slot_index}
+			if _hud.is_empty():
+				return {"kind": "portrait", "slot": slot_index}
+			for unit: Dictionary in _snap["units"]:
+				if unit["side"] == "ally" and unit["slot"] == slot_index and unit["alive"]:
+					return {"kind": "target", "id": unit["id"]}
+			return {"kind": "hud"}
 	for index in 4:
 		if _skill_rect(index).has_point(pos):
 			return {"kind": "skill", "key": ["q", "w", "e", "r"][index]}
@@ -95,6 +146,30 @@ func hit_test(pos: Vector2) -> Dictionary:
 	var panel := _portrait_rect(0).merge(_portrait_rect(3)).grow(8.0)
 	if bar.has_point(pos) or panel.has_point(pos):
 		return {"kind": "hud"}
+	if _hud.is_empty():
+		return {}
+	if SETTINGS_BUTTON.has_point(pos):
+		return {"kind": "settings"}
+	if OUTPUT_PANEL.has_point(pos) or THREAT_PANEL.has_point(pos):
+		return {"kind": "hud"}
+	var target: Dictionary = _by_id.get(_hud["target"], {})
+	if TARGET_BAR.has_point(pos):
+		return {"kind": "target", "id": target["id"]} if not target.is_empty() else {"kind": "hud"}
+	var other := _target_of(target)
+	if not other.is_empty() and TARGET_OF_TARGET_BAR.has_point(pos):
+		return {"kind": "target", "id": other["id"]}
+	# 头顶条绘制在所有单位本体之上；同层反向遍历复现最上层命中。
+	var units: Array = _snap["units"]
+	for index in range(units.size() - 1, -1, -1):
+		var unit: Dictionary = units[index]
+		if unit["alive"] and _world_label_rect(unit).has_point(pos):
+			return {"kind": "world_target", "id": unit["id"]}
+	for index in range(units.size() - 1, -1, -1):
+		var unit: Dictionary = units[index]
+		var offset: Vector2 = pos - unit["pos"]
+		var distance := absf(offset.x) + absf(offset.y) if unit["kind"] == "caster" else offset.length()
+		if unit["alive"] and distance <= float(unit["radius"]):
+			return {"kind": "world_target", "id": unit["id"]}
 	return {}
 
 
@@ -113,7 +188,7 @@ func _text(pos: Vector2, text: String, size: int, color: Color, width: float = -
 	draw_string(_font, pos, text, align, width, size, color)
 
 
-## 完整隔离结束时把既有提示画在结果遮罩上方，保持最后一次真实结果可读。
+## 命中反馈随单位绘制并位于头顶标签下方，结果提示沿用原有遮罩顺序。
 func _draw() -> void:
 	if _snap.is_empty():
 		return
@@ -121,21 +196,26 @@ func _draw() -> void:
 	draw_rect(arena, Color("1b2430"))
 	draw_rect(arena.grow(-6), Color("233040"), false, 2.0)
 	var units: Array = _snap["units"]
-	var by_id: Dictionary = {}
-	for unit: Dictionary in units:
-		by_id[unit["id"]] = unit
 	_draw_telegraphs(units)
+	_draw_aim()
 	var selected: Dictionary = {}
 	for unit: Dictionary in units:
 		if unit["side"] == "ally" and int(unit["slot"]) == _selected_slot:
 			selected = unit
 	if not selected.is_empty() and bool(selected["alive"]):
-		_draw_orders(selected, by_id)
+		_draw_orders(selected, _by_id)
+	var now := Time.get_ticks_msec()
 	for unit: Dictionary in units:
-		_draw_unit(unit, not selected.is_empty() and unit["id"] == selected["id"])
+		_draw_unit(unit, not selected.is_empty() and unit["id"] == selected["id"], now)
+	if not _hud.is_empty():
+		for unit: Dictionary in units:
+			if unit["alive"]:
+				_draw_world_label(unit, not selected.is_empty() and unit["id"] == selected["id"])
 	_draw_portraits(units)
 	_draw_skill_bar(selected)
 	_draw_top()
+	if not _hud.is_empty():
+		_draw_player_hud(selected)
 	var finished: bool = _snap["finished"]
 	var show_final_notice: bool = finished and _snap.get("skill_full_input", false)
 	if show_final_notice:
@@ -144,6 +224,8 @@ func _draw() -> void:
 		_text(Vector2(0, 930), _toast, 30, Color("ffd9a0"), 1920.0, HORIZONTAL_ALIGNMENT_CENTER)
 	if finished and not show_final_notice:
 		_draw_result()
+	if not finished and _hud.get("settings", false):
+		_draw_settings()
 
 
 func _draw_telegraphs(units: Array) -> void:
@@ -161,6 +243,7 @@ func _draw_telegraphs(units: Array) -> void:
 		draw_arc(center, radius, 0.0, TAU, 48, Color(1.0, 0.35, 0.35, 0.9), 3.0)
 
 
+## 绘制走位路径，真人模式的目标指示在头像与头顶标记独立绘制。
 func _draw_orders(selected: Dictionary, by_id: Dictionary) -> void:
 	var pos: Vector2 = selected["pos"]
 	var order_kind: String = selected["order_kind"]
@@ -170,6 +253,8 @@ func _draw_orders(selected: Dictionary, by_id: Dictionary) -> void:
 		draw_arc(dest, 12.0, 0.0, TAU, 24, Color("ffffff"), 2.0)
 		draw_line(dest + Vector2(-6, 0), dest + Vector2(6, 0), Color("ffffff"), 2.0)
 		draw_line(dest + Vector2(0, -6), dest + Vector2(0, 6), Color("ffffff"), 2.0)
+	if not _hud.is_empty():
+		return
 	var target_id: int = selected["target_id"]
 	if target_id >= 0 and by_id.has(target_id):
 		var target: Dictionary = by_id[target_id]
@@ -179,7 +264,8 @@ func _draw_orders(selected: Dictionary, by_id: Dictionary) -> void:
 			draw_arc(target["pos"], float(target["radius"]) + 7.0, 0.0, TAU, 32, color, 2.0)
 
 
-func _draw_unit(unit: Dictionary, is_selected: bool) -> void:
+## 仅给怪物本体混入白色；短环从轮廓外扩，致死命中也可在尸体上短暂播放。
+func _draw_unit(unit: Dictionary, is_selected: bool, now: int) -> void:
 	var pos: Vector2 = unit["pos"]
 	var radius: float = unit["radius"]
 	var alive: bool = unit["alive"]
@@ -187,6 +273,16 @@ func _draw_unit(unit: Dictionary, is_selected: bool) -> void:
 	if not alive:
 		color = Color(0.35, 0.35, 0.38)
 	var enemy: bool = unit["side"] == "enemy"
+	if enemy and _enemy_hits.has(unit["id"]):
+		var hit: Dictionary = _enemy_hits[unit["id"]]
+		var flash_age := now - int(hit["flash_at"])
+		if flash_age < HIT_FLASH_MS:
+			color = color.lerp(Color.WHITE, 0.9 * (1.0 - float(flash_age) / HIT_FLASH_MS))
+		var ring_age := now - int(hit["critical_at"])
+		if ring_age < CRITICAL_RING_MS:
+			var progress := float(ring_age) / CRITICAL_RING_MS
+			var ring_color := Color(1.0, 0.87, 0.58, 0.88 * (1.0 - progress))
+			draw_arc(pos, radius + lerpf(8.0, 22.0, progress), 0.0, TAU, 40, ring_color, 2.5, true)
 	if enemy and unit["kind"] == "caster":
 		var points := PackedVector2Array([pos + Vector2(0, -radius), pos + Vector2(radius, 0), pos + Vector2(0, radius), pos + Vector2(-radius, 0)])
 		draw_colored_polygon(points, color)
@@ -198,10 +294,15 @@ func _draw_unit(unit: Dictionary, is_selected: bool) -> void:
 		draw_line(pos + Vector2(-radius, -radius) * 0.6, pos + Vector2(radius, radius) * 0.6, Color(0.1, 0.1, 0.1), 4.0)
 		draw_line(pos + Vector2(radius, -radius) * 0.6, pos + Vector2(-radius, radius) * 0.6, Color(0.1, 0.1, 0.1), 4.0)
 		return
-	if is_selected:
+	if is_selected and _hud.is_empty():
 		draw_arc(pos, radius + 6.0, 0.0, TAU, 40, Color.WHITE, 3.0)
 	if not enemy:
 		_text(pos + Vector2(-8, 8), str(int(unit["slot"]) + 1), 24, Color(0.05, 0.05, 0.08), 16.0, HORIZONTAL_ALIGNMENT_CENTER)
+	if not _hud.is_empty():
+		for index: int in unit["statuses"].size():
+			var status: String = unit["statuses"][index]
+			draw_circle(pos + Vector2(-radius + 8.0 + index * 12.0, radius + 10.0), 4.0, STATUS_COLOR.get(status, Color.WHITE))
+		return
 	var bar_w := maxf(54.0, radius * 2.4)
 	var bar_pos := pos + Vector2(-bar_w * 0.5, -radius - 16.0)
 	var ratio := float(unit["hp"]) / float(unit["max_hp"])
@@ -241,10 +342,8 @@ func _draw_portraits(units: Array) -> void:
 		var color := Color.html(String(unit["color"]))
 		draw_circle(rect.position + Vector2(52, 42), 22.0, color if alive else Color(0.3, 0.3, 0.33))
 		_text(rect.position + Vector2(86, 30), String(unit["name"]) + ("  倒下" if not alive else ""), 20, Color.WHITE if alive else Color(1, 1, 1, 0.4))
-		var ratio := float(unit["hp"]) / float(unit["max_hp"])
 		var bar_width := rect.size.x - 86.0 - 14.0
-		draw_rect(Rect2(rect.position + Vector2(86, 40), Vector2(bar_width, 10)), Color(0, 0, 0, 0.7))
-		draw_rect(Rect2(rect.position + Vector2(86, 40), Vector2(bar_width * ratio, 10)), Color("6fe08a"))
+		_draw_health(Rect2(rect.position + Vector2(86, 40), Vector2(bar_width, 10)), unit)
 		var res_ratio := float(unit["res"]) / maxf(1.0, float(unit["res_max"]))
 		draw_rect(Rect2(rect.position + Vector2(86, 56), Vector2(bar_width, 8)), Color(0, 0, 0, 0.7))
 		draw_rect(Rect2(rect.position + Vector2(86, 56), Vector2(bar_width * res_ratio, 8)), RESOURCE_COLOR.get(unit["res_kind"], Color.GRAY))
@@ -313,6 +412,7 @@ func _full_skill_cost_text(view: Dictionary) -> String:
 
 
 ## 沿用顶部提示；正式模式说明本批天赋和套装范围，隔离仍说明仅设目标。
+## 战斗计时和操作说明与目标条分层绘制。
 func _draw_top() -> void:
 	var left := maxf(0.0, float(_snap["limit"]) - float(_snap["time"]))
 	var minutes := int(left) / 60
@@ -322,12 +422,222 @@ func _draw_top() -> void:
 	var guide: String = "1～4 按队伍槽位选人　左键选择/点地移动　右键点敌人攻击（牧师右键点队友治疗）　Q/W/E/R 技能　P 暂停/继续"
 	if _snap.get("skill_validation", false):
 		guide = "隔离：右键仅设目标；" + _skill_configuration_text()
+	elif not _hud.is_empty():
+		guide = "1–4 / F1–F4 换人    左键选目标    右键走位／攻击／普疗    Tab 切敌    Q/W/E/R 技能    P 暂停／继续"
 	_text(Vector2(24, 82), guide, 20, Color(1, 1, 1, 0.85))
-	if _snap.get("skill_formal", false):
+	if _snap.get("skill_formal", false) and _hud.is_empty():
 		_text(Vector2(24, 107), "旧天赋本批暂不生效，两件套只加对应 Q", 17, Color(1, 1, 1, 0.7))
 	if bool(_snap["paused"]):
 		draw_rect(Rect2(660, 380, 600, 120), Color(0, 0, 0, 0.7))
 		_text(Vector2(660, 442), "已暂停  按 P 继续", 40, Color("ffd9a0"), 600.0, HORIZONTAL_ALIGNMENT_CENTER)
+
+
+## 血条共用有效治疗预览，实心血量和半透明预补区域不重叠。
+func _draw_health(rect: Rect2, unit: Dictionary) -> void:
+	var maximum := maxf(1.0, float(unit["max_hp"]))
+	var hp := clampf(float(unit["hp"]), 0.0, maximum)
+	var color := Color("6fe08a") if unit["side"] == "ally" else Color("e86a6a")
+	var filled := rect.size.x * hp / maximum
+	draw_rect(rect, Color("101823"))
+	draw_rect(Rect2(rect.position, Vector2(filled, rect.size.y)), color)
+	if unit["id"] == _hud.get("target", -1):
+		var preview := minf(maximum - hp, float(_hud.get("heal_preview", 0.0)))
+		if preview > 0.0:
+			draw_rect(Rect2(rect.position + Vector2(filled, 0), Vector2(rect.size.x * preview / maximum, rect.size.y)), Color(0.55, 1.0, 0.64, 0.46))
+
+
+## 血条和右端身份标识使用同一个命中矩形。
+func _world_label_rect(unit: Dictionary) -> Rect2:
+	var radius: float = unit["radius"]
+	var bar_width := maxf(64.0, radius * 2.4)
+	var badge := 78.0 if _hud.get("prefs", {}).get("names", false) else 26.0
+	var pos: Vector2 = unit["pos"]
+	return Rect2(pos + Vector2(-bar_width * 0.5, -radius - 36.0), Vector2(bar_width + badge, 24.0))
+
+
+## 使用灰盒自绘职业与怪物图标；名称偏好和未知类型都显示可读文字。
+func _draw_identity(rect: Rect2, unit: Dictionary) -> void:
+	var shapes := {"warrior": "shield", "rogue": "blade", "mage": "flame", "priest": "plus",
+		"elite": "crown", "caster": "rune", "melee": "claw"}
+	var shape := String(shapes.get(unit["kind"], ""))
+	if _hud.get("prefs", {}).get("names", false) or shape.is_empty():
+		_text(rect.position + Vector2(2, rect.size.y * 0.5 + 5), unit["name"], 15, Color("eef3ff"), rect.size.x - 4, HORIZONTAL_ALIGNMENT_CENTER)
+		return
+	draw_rect(rect.grow(-2), Color.html(String(unit["color"])).darkened(0.54))
+	draw_rect(rect.grow(-2), Color("adc1df"), false, 1.0)
+	var center := rect.get_center()
+	var ink := Color("eef3ff")
+	var path := PackedVector2Array()
+	match shape:
+		"shield":
+			path = PackedVector2Array([Vector2(-6, -6), Vector2(6, -6), Vector2(5, 2), Vector2(0, 7), Vector2(-5, 2)])
+		"blade":
+			path = PackedVector2Array([Vector2(-6, 6), Vector2(-5, 2), Vector2(6, -7), Vector2(4, 0), Vector2(0, 3)])
+		"flame":
+			path = PackedVector2Array([Vector2(-6, 2), Vector2(-2, -3), Vector2(1, -8), Vector2(6, 1), Vector2(5, 6), Vector2(-4, 6)])
+		"plus":
+			draw_rect(Rect2(center + Vector2(-6, -2), Vector2(12, 4)), ink)
+			draw_rect(Rect2(center + Vector2(-2, -6), Vector2(4, 12)), ink)
+		"crown":
+			path = PackedVector2Array([Vector2(-8, -5), Vector2(-3, 0), Vector2(0, -6), Vector2(3, 0), Vector2(8, -5), Vector2(6, 6), Vector2(-6, 6)])
+		"rune":
+			draw_arc(center, 6, 0, TAU, 20, ink, 1.5, true)
+			draw_line(center + Vector2(-5, 5), center + Vector2(5, -5), ink, 1.5, true)
+		"claw":
+			for index in range(-1, 2):
+				draw_line(center + Vector2(index * 4 - 2, 5), center + Vector2(index * 4 + 2, -5), ink, 1.5, true)
+	if not path.is_empty():
+		for index in path.size():
+			path[index] += center
+		draw_colored_polygon(path, ink)
+
+
+## 头顶两个方向一致的标记用填充和描边区分，自己选自己时向两侧错开。
+func _draw_world_label(unit: Dictionary, controlled: bool) -> void:
+	var rect := _world_label_rect(unit)
+	var icon_width := 78.0 if _hud["prefs"]["names"] else 26.0
+	var badge := Rect2(rect.end.x - icon_width, rect.position.y, icon_width, rect.size.y)
+	_draw_health(Rect2(rect.position + Vector2(0, 8), Vector2(rect.size.x - icon_width, 8)), unit)
+	_draw_identity(badge, unit)
+	var cast: Dictionary = unit["cast"]
+	if not cast.is_empty():
+		var cast_pos := rect.position + Vector2(0, -9)
+		var cast_width := rect.size.x - icon_width
+		draw_rect(Rect2(cast_pos, Vector2(cast_width, 4)), Color("26303c"))
+		draw_rect(Rect2(cast_pos, Vector2(cast_width * float(cast["progress"]), 4)), Color("ffcf5a"))
+	var targeted: bool = unit["id"] == _hud["target"]
+	var center: Vector2 = Vector2(unit["pos"].x, rect.position.y - 13)
+	if controlled:
+		var base := center + Vector2(-10 if targeted else 0, 0)
+		draw_colored_polygon(PackedVector2Array([base + Vector2(-8, -12), base + Vector2(8, -12), base + Vector2(0, 0)]), Color("73f6ac"))
+	if targeted:
+		var base := center + Vector2(10 if controlled else 0, 0)
+		draw_polyline(PackedVector2Array([base + Vector2(-8, -12), base + Vector2(8, -12), base + Vector2(0, 0), base + Vector2(-8, -12)]), Color("ff777d"), 2.4, true)
+
+
+## 锁定的读条目标优先；若它已倒下，仍显示锁定事实但由输入入口拒绝选择。
+func _target_of(target: Dictionary) -> Dictionary:
+	if target.is_empty():
+		return {}
+	var id: int = target.get("cast_target_id", -1)
+	if id >= 0:
+		return _by_id.get(id, {})
+	var other: Dictionary = _by_id.get(target.get("target_id", -1), {})
+	return other if other.get("alive", false) else {}
+
+
+## 顶部两层目标共用血量组件，右端身份与头顶标签使用同一偏好。
+func _draw_target_bar(rect: Rect2, unit: Dictionary, label: String) -> void:
+	_draw_panel(rect)
+	if unit.is_empty():
+		_text(rect.position + Vector2(16, 35), label, 20, Color("acb9cb"))
+		return
+	var badge_width := 74.0 if _hud["prefs"]["names"] else 33.0
+	var badge := Rect2(rect.end.x - badge_width - 8.0, rect.position.y + 6.0, badge_width, rect.size.y - 12.0)
+	_draw_identity(badge, unit)
+	var health_text := "%d/%d" % [roundi(unit["hp"]), roundi(unit["max_hp"])]
+	_text(rect.position + Vector2(12, 22), "%s%s" % [label, unit["name"]], 17, Color("eef3ff"))
+	_draw_health(Rect2(rect.position + Vector2(12, 28), Vector2(rect.size.x - badge_width - 30, 16)), unit)
+	_text(Vector2(badge.position.x - 110, rect.position.y + 41), health_text, 14, Color("ffffff"), 96, HORIZONTAL_ALIGNMENT_RIGHT)
+
+
+## 瞄准层只画输入投影；红圈表示边界或射程无效。
+func _draw_aim() -> void:
+	var aim: Dictionary = _hud.get("aim", {})
+	if not aim.get("show", false):
+		return
+	var center: Vector2 = aim["center"]
+	var color := Color("78c8ff") if aim["valid"] else Color("ff7278")
+	var reach: float = aim["reach"]
+	if reach > 0.0:
+		draw_arc(aim["origin"], reach, 0, TAU, 64, Color(color, 0.32), 1.5, true)
+	var target: Dictionary = _by_id.get(aim["target"], {})
+	var radius: float = aim["radius"]
+	if radius > 0.0:
+		draw_circle(center, radius, Color(color, 0.12))
+	elif not target.is_empty():
+		radius = float(target["radius"]) + 7.0
+	else:
+		radius = 12.0
+	draw_arc(center, radius, 0, TAU, 56, color, 2.0, true)
+	if not aim["valid"]:
+		_text(center + Vector2(14, 24), "落点不可用／超出射程", 16, color)
+
+
+## 两个统计窗从战斗快照读取，每场按当前模拟时间计算 DPS。
+func _draw_player_hud(actor: Dictionary) -> void:
+	var target: Dictionary = _by_id.get(_hud["target"], {})
+	var other := _target_of(target)
+	_draw_target_bar(TARGET_BAR, target, "未选中目标" if target.is_empty() else "")
+	if not other.is_empty():
+		_draw_target_bar(TARGET_OF_TARGET_BAR, other, "读条目标  " if target.get("cast_target_id", -1) >= 0 else "目标的目标  ")
+	var auto: Dictionary = _by_id.get(actor.get("auto_target_id", -1), {})
+	if auto.get("alive", false) and auto["id"] != _hud["target"] and actor.get("attack_kind") == "damage":
+		_text(TARGET_BAR.position + Vector2(12, 80), "普攻：%s" % auto["name"], 17, Color("ffcf80"))
+	_draw_panel(SETTINGS_BUTTON)
+	_text(SETTINGS_BUTTON.position + Vector2(0, 26), "设置", 19, Color("e3efff"), SETTINGS_BUTTON.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+	_draw_meter(OUTPUT_PANEL, target, false)
+	_draw_meter(THREAT_PANEL, target, true)
+
+
+## 仇恨和输出分别排序，怪物实际目标标记与榜首相互独立。
+func _draw_meter(rect: Rect2, target: Dictionary, threat: bool) -> void:
+	_draw_panel(rect)
+	_text(rect.position + Vector2(12, 25), "仇恨" if threat else "输出  ·  总伤害 / DPS", 18, Color("e3efff"))
+	if threat and target.get("side") != "enemy":
+		_text(rect.position + Vector2(12, 55), "选中敌人查看仇恨", 17, Color("a7b5c7"))
+		return
+	var rows: Array[Dictionary] = []
+	var threat_by_unit: Dictionary = target.get("threat", {})
+	for unit: Dictionary in _snap["units"]:
+		if unit["side"] == "ally" and (not threat or unit["alive"]):
+			rows.append({"id": unit["id"], "name": unit["name"], "value": float(threat_by_unit.get(unit["id"], 0.0)) if threat else float(unit["damage_done"])})
+	# 数值相同时稳定排序，列表不会在等额更新时抖动。
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["id"] < b["id"] if a["value"] == b["value"] else a["value"] > b["value"])
+	var elapsed := float(_snap["time"])
+	var base_y := 51.0
+	for row in rows:
+		var active: bool = threat and row["id"] == target.get("target_id", -1)
+		var value: float = row["value"]
+		var amount := "%d" % roundi(value) if threat else "%d / %.1f" % [roundi(value), value / elapsed if elapsed > 0.0 else 0.0]
+		var lead: float = maxf(1.0, rows[0]["value"])
+		var color := Color("ffd28d") if active else Color("dce9f9")
+		draw_rect(Rect2(rect.position + Vector2(9, base_y - 13), Vector2((rect.size.x - 18) * value / lead, 19)), Color(0.28, 0.40, 0.58, 0.35))
+		_text(rect.position + Vector2(12, base_y + 2), ("▶ " if active else "") + row["name"], 17, color)
+		_text(rect.position + Vector2(73, base_y + 2), amount, 16, color, rect.size.x - 85, HORIZONTAL_ALIGNMENT_RIGHT)
+		base_y += 25
+	if threat and "taunt" in target.get("statuses", []):
+		_text(rect.position + Vector2(12, 163), "嘲讽中", 15, Color("ffd28d"))
+
+
+## 为信息框和设置项提供一致的暗底、描边及可点击边界。
+func _draw_panel(rect: Rect2) -> void:
+	draw_rect(rect, Color("101925ee"))
+	draw_rect(rect, Color("52657c"), false, 1.0)
+
+
+## 当前设置值与实际命中矩形共用行定义。
+func _option_rect(index: int) -> Rect2:
+	return Rect2(692, 404 + 69 * index, 532, 50)
+
+
+## 暂停设置保留清晰的模态边界，关闭操作与鼠标选项均由场景消费。
+func _draw_settings() -> void:
+	draw_rect(Rect2(0, 0, 1920, 1080), Color(0, 0, 0, 0.60))
+	_draw_panel(SETTINGS_PANEL)
+	_text(SETTINGS_PANEL.position + Vector2(34, 47), "战斗设置", 30, Color("eef3ff"))
+	var prefs: Dictionary = _hud["prefs"]
+	var items := ["身份显示     %s" % ("名称" if prefs["names"] else "头像"),
+		"施法方式     %s" % ("按住预览，松开施放" if prefs["release_cast"] else "按下立即施放"),
+		"Tab 排序     %s" % ("当前生命值最低" if prefs["tab_health"] else "就近")]
+	for index in items.size():
+		var row := _option_rect(index)
+		_draw_panel(row)
+		_text(row.position + Vector2(15, 33), items[index], 21, Color("eef3ff"))
+	_draw_panel(SETTINGS_CLOSE)
+	_text(SETTINGS_CLOSE.position + Vector2(27, 27), "关闭", 18, Color("eef3ff"))
+	_text(Vector2(693, 671), _toast if not _toast.is_empty() else "关闭后按 P 继续", 18, Color("adc1df"))
 
 
 ## 保留原结果矩形和样式；隔离画面只说明验证结束，不宣称奖励、存档或正式出征。
