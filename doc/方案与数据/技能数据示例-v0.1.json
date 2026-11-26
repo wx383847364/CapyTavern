@@ -1,0 +1,158 @@
+{
+  "skills": [
+    {
+      "skill_id": "mage.fire.flame_burst",
+      "spec_id": "mage.fire",
+      "name": "烈焰爆破",
+      "icon": null,
+      "target_kind": "ENEMY",
+      "cast_range_m": 8,
+      "mana_cost": 25,
+      "cooldown_s": 8,
+      "effects": [
+        {
+          "kind": "MAGIC_DAMAGE",
+          "selector": "ENEMIES_AROUND_PRIMARY",
+          "power_coeff": 1.7,
+          "flat_amount": 0,
+          "radius_m": 2,
+          "duration_s": 0,
+          "uses_stable_crit": true,
+          "uses_mastery": false
+        }
+      ]
+    },
+    {
+      "skill_id": "mage.fire.fireball",
+      "spec_id": "mage.fire",
+      "name": "火球",
+      "icon": null,
+      "target_kind": "ENEMY",
+      "cast_range_m": 8,
+      "mana_cost": 15,
+      "cooldown_s": 3,
+      "effects": [
+        {
+          "kind": "MAGIC_DAMAGE",
+          "selector": "PRIMARY",
+          "power_coeff": 1.1,
+          "flat_amount": 0,
+          "radius_m": 0,
+          "duration_s": 0,
+          "uses_stable_crit": true,
+          "uses_mastery": true
+        }
+      ]
+    },
+    {
+      "skill_id": "mage.fire.flame_barrier",
+      "spec_id": "mage.fire",
+      "name": "烈焰屏障",
+      "icon": null,
+      "target_kind": "SELF",
+      "cast_range_m": 0,
+      "mana_cost": 20,
+      "cooldown_s": 16,
+      "effects": [
+        {
+          "kind": "SHIELD",
+          "selector": "SELF",
+          "power_coeff": 1.5,
+          "flat_amount": 0,
+          "radius_m": 0,
+          "duration_s": 6,
+          "uses_stable_crit": false,
+          "uses_mastery": false
+        }
+      ]
+    },
+    {
+      "skill_id": "mage.fire.evocation",
+      "spec_id": "mage.fire",
+      "name": "唤醒",
+      "icon": null,
+      "target_kind": "SELF",
+      "cast_range_m": 0,
+      "mana_cost": 0,
+      "cooldown_s": 20,
+      "effects": [
+        {
+          "kind": "RESTORE_MANA",
+          "selector": "SELF",
+          "power_coeff": 0,
+          "flat_amount": 35,
+          "radius_m": 0,
+          "duration_s": 0,
+          "uses_stable_crit": false,
+          "uses_mastery": false
+        }
+      ]
+    },
+    {
+      "skill_id": "priest.holy.greater_heal",
+      "spec_id": "priest.holy",
+      "name": "强效治疗",
+      "icon": null,
+      "target_kind": "ALLY",
+      "cast_range_m": 8,
+      "mana_cost": 25,
+      "cooldown_s": 5,
+      "effects": [
+        {
+          "kind": "HEAL",
+          "selector": "PRIMARY",
+          "power_coeff": 2.4,
+          "flat_amount": 0,
+          "radius_m": 0,
+          "duration_s": 0,
+          "uses_stable_crit": true,
+          "uses_mastery": true
+        }
+      ]
+    }
+  ],
+  "spec_loadouts": [
+    {
+      "spec_id": "mage.fire",
+      "slots": [
+        "mage.fire.flame_burst",
+        "mage.fire.fireball",
+        "mage.fire.flame_barrier",
+        "mage.fire.evocation"
+      ]
+    },
+    {
+      "spec_id": "priest.holy",
+      "slots": [
+        "priest.holy.greater_heal",
+        null,
+        null,
+        null
+      ]
+    }
+  ],
+  "enemy_ability_examples": [
+    {
+      "ability_id": "boss.meteor",
+      "name": "分摊陨石",
+      "target_strategy": "CURRENT_THREAT_TARGET_FEET",
+      "lock_timing": "CAST_START",
+      "windup_s": 2,
+      "cooldown_s": 15,
+      "interruptible": false,
+      "effects": [
+        {
+          "kind": "MAGIC_DAMAGE",
+          "selector": "ENEMIES_IN_LOCKED_AREA",
+          "power_coeff": 3,
+          "flat_amount": 0,
+          "radius_m": 2.5,
+          "duration_s": 0,
+          "uses_stable_crit": false,
+          "uses_mastery": false,
+          "damage_distribution": "SPLIT_EVENLY"
+        }
+      ]
+    }
+  ]
+}
