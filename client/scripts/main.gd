@@ -20,11 +20,14 @@ const ACTIONS: PackedStringArray = [
 @onready var _echo: Label = $Echo
 
 
-## 保留原入口选择；先记录启动与退出意图，诊断不增加自动关闭定时器。
+## 从工程版本设置标题与启动日志，场景切换继续使用同一个窗口。
 func _ready() -> void:
+	var project_name := String(ProjectSettings.get_setting("application/config/name"))
+	var version := String(ProjectSettings.get_setting("application/config/version"))
+	get_tree().root.title = "%s v%s" % [project_name, version]
 	TavernEvents.diagnostic("application_started", {"engine": Engine.get_version_info().string, "scene": scene_file_path, "display": DisplayServer.get_name(), "user_dir": OS.get_user_data_dir(), "args": Array(OS.get_cmdline_user_args())})
 	TavernEvents.observe_window(get_tree().root)
-	print("CapyTavern P2 ready, godot ", Engine.get_version_info().string)
+	print("CapyTavern P2 ready, godot ", Engine.get_version_info().string, " | ", get_tree().root.title)
 	# 单档命令行模式：--do=命令，见 save_cli.gd。跑完直接退出，不进界面。
 	if SaveCli.wanted(OS.get_cmdline_user_args()):
 		var code: int = SaveCli.run(OS.get_cmdline_user_args())
