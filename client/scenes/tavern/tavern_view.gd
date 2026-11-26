@@ -45,6 +45,7 @@ func _text(pos: Vector2, text: String, size: int, color: Color, width: float = -
 	draw_string(_font, pos, text, align, width, size, color)
 
 
+## 常显交互点名称与招募后的下一步；只调整画面文字，不改变交互范围或移动规则。
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, 1920, 1080), Color("120d09"))
 	if _layout.is_empty():
@@ -54,7 +55,6 @@ func _draw() -> void:
 	draw_rect(bounds, BOUNDS_LINE, false, 2.0)
 	for entry: Dictionary in _layout["obstacles"]:
 		draw_rect(_rect(entry), WALL)
-		_text(_rect(entry).position + Vector2(8, 22), String(entry["id"]), 16, Color(1, 1, 1, 0.25))
 	var hover := String(_snapshot.get("hover", ""))
 	var pending := String(_snapshot.get("pending", ""))
 	for entry: Dictionary in _objects:
@@ -64,13 +64,21 @@ func _draw() -> void:
 		draw_rect(rect, color, false, 3.0 if String(entry["id"]) != hover else 6.0)
 		var approach := _point(entry["approach"])
 		draw_arc(approach, float(entry["range"]), 0.0, TAU, 40, Color(color, 0.35 if String(entry["id"]) != pending else 0.9), 2.0)
-		if String(entry["id"]) == hover or String(entry["id"]) == pending:
-			_text(rect.position + Vector2(0, -10), String(entry["name"]), 24, Color.WHITE)
+		# 显示名称按既有 kind 与底部按钮统一，布局表的名称和 id 保持原样。
+		var display_name := String(entry["name"])
+		match String(entry["kind"]):
+			"recruit":
+				display_name = "招募伙伴"
+			"prepare":
+				display_name = "队伍整备"
+			"sortie":
+				display_name = "出征准备"
+		_text(rect.position + Vector2(-40, -10), display_name, 24, Color.WHITE, rect.size.x + 80.0, HORIZONTAL_ALIGNMENT_CENTER)
 	_draw_captain()
-	_text(Vector2(24, 54), "酒馆灰盒（P3b：面板与出征入口）", 22, Color(1, 1, 1, 0.55))
 	if _members == 0:
 		_text(Vector2(24, 90), "还没有队伍，场景里没有队长。点下方「招募伙伴」，或点黄色公告板，招募第一名队员后队长就会出现。", 22, Color(1, 0.9, 0.6, 0.9))
 	else:
+		_text(Vector2(24, 54), "下一步：点「队伍整备」看装备和天赋，准备好后点「出征准备」。", 22, Color(1, 0.9, 0.6, 0.9))
 		_text(Vector2(24, 90), "操作：左键点地走路 / 点方块走近后开面板，右键停步，Esc 退一层", 20, Color(1, 1, 1, 0.55))
 	if _toast != "":
 		_text(Vector2(0, 972), _toast, 30, Color(1, 0.85, 0.5), 1920.0, HORIZONTAL_ALIGNMENT_CENTER)

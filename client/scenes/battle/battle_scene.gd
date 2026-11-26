@@ -7,6 +7,7 @@ const BattleEvents := preload("res://scripts/battle/battle_events.gd")
 const BattleConfig := preload("res://scripts/battle/battle_config.gd")
 const BattleLaunch := preload("res://scripts/battle/battle_launch.gd")
 const BattleController := preload("res://scripts/input/battle_controller.gd")
+const BattleViewScript := preload("res://scenes/ui/battle_view.gd")
 const BattleBot := preload("res://scripts/input/battle_bot.gd")
 const SaveStore := preload("res://scripts/data/save_store.gd")
 const SaveService := preload("res://scripts/data/save_service.gd")
@@ -34,25 +35,70 @@ var _result: String = ""
 var _settled: bool = false
 var _outcome: String = ""
 
-@onready var _view: Node2D = $View
+## 隔离 View 须显式开启并在绑定前提供现有脚本节点；默认场景仍取得原节点。
+@onready var _view: Node2D = get_node_or_null("View")
+var _skill_validation_view: bool = false
+var _skill_view_slot: String = "R"
+var _skill_input_notice: String = ""
+var _skill_result_notice: String = ""
+var _skill_validation_mode: bool = false
+var _skill_validation_id: String = ""
+var _skill_validation_speed: int = 1
+var _skill_lifecycle_started: bool = false
+## 仅存执行结果的独立数据；与 controller.last_input 的入队诊断分开。
+var last_cast_result: Dictionary = {}
 
 
+## 隔离实例保留非正式生命周期；酒馆正式战斗领取预检实例，再进入原日志、服务和自动战斗。
 func _ready() -> void:
-	_config = BattleConfig.load_config({"talents": BattleLaunch.talents, "sets": BattleLaunch.sets})
-	var problems := BattleConfig.validate(_config)
-	if not problems.is_empty():
-		push_error("战斗配置不可用：" + "; ".join(problems))
-		get_tree().quit(2)
+	_skill_lifecycle_started = true
+	if _skill_validation_mode:
+		if not _skill_validation_view:
+			_view = null
+		if not _skill_validation_current():
+			_close_skill_validation()
+		else:
+			_refresh_view()
 		return
-	print("BALANCE talents=%s sets=%s applied=%s warnings=%s" % [_config["talents"], BattleLaunch.sets, _config["applied_modifiers"], _config["warnings"]])
+	# 预检产物只供本次正式出征领取。默认入口和其他阵容依旧用原初始化。
+	var prepared := BattleLaunch.formal_sortie
+	BattleLaunch.formal_sortie = {}
+	var use_formal := BattleLaunch.from_tavern and (not prepared.is_empty() or not BattleConfig.formal_specs(BattleLaunch.slots).is_empty())
+	if use_formal:
+		sim = prepared.get("sim") as BattleSim
+		if sim == null or not sim.formal_skill_sortie or prepared.get("run_id") != BattleLaunch.run_id or prepared.get("slots") != BattleLaunch.slots:
+			# 此分支只防失效交接；加载及快照错误应已在酒馆留原面板并可重试。
+			push_error("正式出征缺少同场已预检实例")
+			get_tree().quit(2)
+			return
+		_config = sim.config
+		events = sim.events
+	else:
+		_config = BattleConfig.load_config({"talents": BattleLaunch.talents, "sets": BattleLaunch.sets})
+		var problems := BattleConfig.validate(_config)
+		if not problems.is_empty():
+			push_error("战斗配置不可用：" + "; ".join(problems))
+			get_tree().quit(2)
+			return
+		events = BattleEvents.new()
+	if use_formal:
+		print("BALANCE_FORMAL run_id=%s specs=%s q_sets=%s legacy_modifiers=%s" % [BattleLaunch.run_id, BattleConfig.formal_specs(BattleLaunch.slots), BattleLaunch.sets, _config["applied_modifiers"]])
+	else:
+		print("BALANCE talents=%s sets=%s applied=%s warnings=%s" % [_config["talents"], BattleLaunch.sets, _config["applied_modifiers"], _config["warnings"]])
 	_tick = float(_config["tick"])
-	events = BattleEvents.new()
 	events.echo_stdout = true
 	events.open_log(LOG_PATH)
-	sim = BattleSim.new()
-	sim.setup(_config, BattleLaunch.slots, BattleLaunch.seed, events)
+	if not use_formal:
+		sim = BattleSim.new()
+		sim.setup(_config, BattleLaunch.slots, BattleLaunch.seed, events)
 	controller = BattleController.new()
-	controller.setup(sim, events, BattleLaunch.captain_slot if BattleLaunch.from_tavern else -1)
+	if not controller.setup(sim, events, BattleLaunch.captain_slot if BattleLaunch.from_tavern else -1):
+		push_error("战斗输入绑定失败")
+		get_tree().quit(2)
+		return
+	if use_formal:
+		events.cast_resolved.connect(_on_formal_cast)
+		sim.publish_formal_start()
 	events.command_rejected.connect(_on_rejected)
 	events.battle_ended.connect(_on_ended)
 	if BattleLaunch.from_tavern:
@@ -78,7 +124,19 @@ func _ready() -> void:
 	_refresh_view()
 
 
+## 隔离模式直接交真实帧时间给已验调度，不另积时或截断；默认推进正文保留。
 func _process(delta: float) -> void:
+	_skill_lifecycle_started = true
+	if _skill_validation_mode:
+		if not _skill_validation_current():
+			_close_skill_validation()
+			return
+		sim._advance_skill_schedule(delta, _skill_validation_speed)
+		if not _skill_validation_current():
+			_close_skill_validation()
+		else:
+			_refresh_view()
+		return
 	if sim == null or _leaving:
 		return
 	_accumulator += minf(delta, 0.25)
@@ -90,21 +148,50 @@ func _process(delta: float) -> void:
 	_refresh_view()
 
 
-func _refresh_view() -> void:
+## 隔离渲染保留独立最终画面；正式专精沿用实战日志和结算界面，同时显示技能执行结果。
+func _refresh_view(final_frame: bool = false) -> void:
+	if _skill_validation_mode:
+		if not _skill_validation_view or _view == null or sim == null or controller == null or _leaving:
+			return
+		if sim.skill_battle_id != _skill_validation_id or not sim._skill_schedule_active:
+			return
+		if not final_frame and not _skill_validation_current():
+			return
+		var data := sim.snapshot(true)
+		data["skill_focus_slot"] = _skill_view_slot
+		if controller._skill_full_input:
+			data["skill_full_input"] = true
+		_view.call("render", data, controller.selected_slot, _skill_input_notice + "  " + _skill_result_notice, "")
+		return
 	if Time.get_ticks_msec() > _toast_until_ms:
 		_toast = ""
-	_view.call("render", sim.snapshot(), controller.selected_slot, _toast, ProjectSettings.globalize_path(LOG_PATH))
+	var text := _toast
+	if sim.formal_skill_sortie and not _skill_result_notice.is_empty():
+		text = _skill_result_notice
+	_view.call("render", sim.snapshot(), controller.selected_slot, text, ProjectSettings.globalize_path(LOG_PATH))
 
 
+## 新的正式普通命令拒绝取代上次技能提示；旧战斗和隔离继续使用原反馈。
 func _on_rejected(unit_id: int, _kind: String, reason: String) -> void:
+	if _skill_validation_mode:
+		_toast = reason
+		return
 	var unit := controller.selected_unit()
 	if unit == null or unit.id != unit_id:
 		return
 	_toast = String(_view.call("reason_text", reason))
 	_toast_until_ms = Time.get_ticks_msec() + 1500
+	if sim.formal_skill_sortie:
+		_skill_result_notice = ""
 
 
+## 隔离结束只解绑清队列，不能执行旧日志收尾、存档结算或场景跳转。
 func _on_ended(result: String, reason: String, elapsed: float) -> void:
+	if _skill_validation_mode:
+		_result = result
+		_refresh_view(true)
+		_close_skill_validation()
+		return
 	_result = result
 	events.close_log()
 	print("BATTLE_RESULT result=%s reason=%s elapsed=%.2f log=%s" % [result, reason, elapsed, ProjectSettings.globalize_path(LOG_PATH)])
@@ -125,7 +212,11 @@ func _on_ended(result: String, reason: String, elapsed: float) -> void:
 			get_tree().quit(0)
 
 
+## 键盘与真实点击沿用原分发；隔离模式先拒绝失效绑定，echo/释放均不生成请求。
 func _unhandled_input(event: InputEvent) -> void:
+	if _skill_validation_mode and not _skill_validation_current():
+		_close_skill_validation()
+		return
 	if sim == null or _leaving:
 		return
 	if event is InputEventKey and (event as InputEventKey).echo:
@@ -142,12 +233,19 @@ func _unhandled_input(event: InputEvent) -> void:
 		_on_click(_event_pos(event), true)
 	elif event.is_action_pressed("pause"):
 		controller.toggle_pause()
+	# 选人通知可同步离场；不能继续用已解绑控制器处理本事件的其他动作。
+	if _skill_validation_mode and not _skill_validation_current():
+		return
 	for index in SLOT_ACTIONS.size():
 		if event.is_action_pressed(SLOT_ACTIONS[index]):
 			controller.select_slot(index)
+			if _skill_validation_mode and not _skill_validation_current():
+				return
 	for action: String in SKILL_ACTIONS:
 		if event.is_action_pressed(action):
-			controller.press_skill(SKILL_ACTIONS[action])
+			_submit_skill(String(SKILL_ACTIONS[action]))
+	if _skill_validation_mode:
+		_refresh_view()
 
 
 ## 鼠标事件自带的位置换成战场坐标（不读全局鼠标位置，窗口没焦点或注入事件时也准）。
@@ -159,12 +257,33 @@ func _event_pos(event: InputEvent) -> Vector2:
 
 ## 点击先给界面：头像、技能按钮、面板空白处都不会传给战场。
 func _on_click(pos: Vector2, secondary: bool) -> void:
-	var hit: Dictionary = _view.call("hit_test", pos)
+	if _skill_validation_mode and not _skill_validation_current():
+		return
+	# 无 View 的隔离实例没有几何命中能力；验证直接调用同一分发函数，不伪装图形验收。
+	if _view == null:
+		return
+	# 战场点交控制器，View命中点单独转入其局部坐标；父子位移不能把面板点击漏给移动。
+	var hit_pos := _view.to_local(to_global(pos)) if _skill_validation_view else pos
+	var hit: Dictionary = _view.call("hit_test", hit_pos)
+	_dispatch_click(hit, pos, secondary)
+
+
+## 分发真实点击；正式场普通命令入队前的拒绝也走已有提示，选人和右键空地不重放旧结果。
+func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
+	if _leaving or sim == null or (_skill_validation_mode and not _skill_validation_current()):
+		return
 	if hit.is_empty():
+		var previous_input := controller.last_input
 		if secondary:
 			controller.on_right_click(pos)
 		else:
 			controller.on_left_click(pos)
+		# 控制器每次入队尝试都会换结果字典；相同拒绝连续发生时仍要更新提示时间。
+		var latest_input := controller.last_input
+		if sim.formal_skill_sortie and not is_same(previous_input, latest_input) and not latest_input.get("queued", false):
+			var unit := controller.selected_unit()
+			if unit != null:
+				_on_rejected(unit.id, "target" if secondary else "move", String(latest_input["reason"]))
 		return
 	if secondary:
 		return
@@ -172,18 +291,52 @@ func _on_click(pos: Vector2, secondary: bool) -> void:
 		"portrait":
 			controller.select_slot(int(hit["slot"]))
 		"skill":
-			controller.press_skill(String(hit["key"]))
+			_submit_skill(String(hit["key"]))
 
 
+## 键钮共用一个入口，正式技能提交提示替换更旧的普通命令提示，实际效果等执行事件。
+func _submit_skill(key: String) -> void:
+	controller.press_skill(key)
+	if _skill_validation_mode:
+		_skill_validation_input_notice(key)
+	elif sim.formal_skill_sortie:
+		# 法力和目标等由执行时判定；暂停、空槽等未入队情况仅显示输入提示。
+		var why := String(controller.last_input.get("reason", ""))
+		_toast = ""
+		_skill_result_notice = "技能已入队" if controller.last_input.get("queued", false) else "输入拒绝：" + String(BattleViewScript.REASON_TEXT.get(why, "输入不可用"))
+
+
+## 失焦暂停不自动恢复；退出/销毁立即解绑，即使未入树的验证实例也清理订阅。
 func _notification(what: int) -> void:
-	# 失去焦点：战斗暂停，回来后等玩家自己按 P 继续
+	if what == NOTIFICATION_ENTER_TREE:
+		_skill_lifecycle_started = true
+	if _skill_validation_mode:
+		if what == NOTIFICATION_EXIT_TREE or what == NOTIFICATION_PREDELETE:
+			_close_skill_validation()
+		elif what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+			if _skill_validation_current():
+				sim.set_paused(true)
+			else:
+				_close_skill_validation()
+		return
+	# 失去焦点：战斗暂停，回来后等玩家自己按 P 继续。
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and sim != null:
 		sim.set_paused(true)
+	elif what == NOTIFICATION_EXIT_TREE and sim != null and sim.formal_skill_sortie:
+		# 离场时断开本场订阅并清理盾、关系和排队请求。
+		if events.cast_resolved.is_connected(_on_formal_cast):
+			events.cast_resolved.disconnect(_on_formal_cast)
+		if controller != null:
+			controller.release_skill_validation()
+		sim._leave_skill_schedule()
+		events.close_log()
 
 
 ## 结算写进存档（P2b 的 settle）。选中的战斗角色只记 selectedSlot，不会变成队长。
 ## 写失败：不返回、不发奖，结果页提示，再按一次返回就重试。
 func _settle() -> bool:
+	if _skill_validation_mode:
+		return false
 	if _settled:
 		return true
 	var party: Array = []
@@ -203,16 +356,193 @@ func _settle() -> bool:
 	return false
 
 
+## 正式胜负沿用原保存重试；运行中配置停场允许返回酒馆，跳过胜负和奖励写入。
 func _back_to_main() -> void:
+	if _skill_validation_mode:
+		_close_skill_validation()
+		return
 	if BattleLaunch.from_tavern:
-		if not _settle():
+		var configuration_error := sim != null and sim.formal_skill_sortie and sim.result == "error"
+		if not configuration_error and not _settle():
 			return
 		_leaving = true
 		BattleLaunch.from_tavern = false
 		SortieSession.locked = {}
-		SortieSession.returned = {"result": _result, "run_id": BattleLaunch.run_id, "outcome": _outcome}
+		SortieSession.returned = {} if configuration_error else {"result": _result, "run_id": BattleLaunch.run_id, "outcome": _outcome}
 		SortieSession.change_scene(get_tree(), SortieSession.TAVERN_SCENE)
 		return
 	_leaving = true
 	events.close_log()
 	get_tree().change_scene_to_file(MAIN_SCENE)
+
+
+## 入树前原子验证候选及可选现有 View；显式选项默认关闭，不补建节点或正式初始化。
+func bind_skill_validation(battle_sim: BattleSim, bus: BattleEvents, with_view: bool = false) -> bool:
+	if battle_sim == null or bus == null or _skill_lifecycle_started or is_inside_tree():
+		return false
+	# 在修改任何绑定前检查现有子节点，不能靠 ready 自动补建或默认场景初始化兜底。
+	var candidate_view := get_node_or_null("View")
+	if with_view and (not candidate_view is Node2D or candidate_view.get_script() != BattleViewScript or candidate_view.is_queued_for_deletion()):
+		return false
+	if _skill_validation_mode and sim == battle_sim and events == bus and controller != null and _skill_validation_id == battle_sim.skill_battle_id:
+		# 同场重复绑定不重复订阅，也不清掉跨角色请求序号。
+		if not controller.setup(battle_sim, bus, controller.selected_slot, true):
+			return false
+		_skill_validation_view = with_view
+		_view = candidate_view if with_view else null
+		return true
+	var candidate := BattleController.new()
+	if not candidate.setup(battle_sim, bus, -1, true):
+		return false
+	if _skill_validation_mode:
+		_close_skill_validation()
+	_skill_validation_mode = true
+	_skill_validation_view = with_view
+	_view = candidate_view if with_view else null
+	_skill_view_slot = "R"
+	_skill_input_notice = ""
+	_skill_result_notice = ""
+	_skill_validation_id = battle_sim.skill_battle_id
+	_skill_validation_speed = 1
+	sim = battle_sim
+	events = bus
+	controller = candidate
+	_leaving = false
+	_toast = ""
+	last_cast_result = {}
+	events.cast_resolved.connect(_on_validation_cast)
+	events.battle_ended.connect(_on_ended)
+	return true
+
+
+## 只核本次绑定的身份；旧场控制器不能自动取得新场的调度或输入权。
+func _skill_validation_current() -> bool:
+	return not _leaving and sim != null and events != null and controller != null and sim.events == events and not _skill_validation_id.is_empty() and sim.skill_battle_id == _skill_validation_id and sim._skill_schedule_active and sim._skill_transactions_enabled and not sim.finished and not sim.skill_input_locked
+
+
+## 只允许既有两档倍速，不推进时钟、不改模拟单步长度，暂停时也可选择恢复后的倍率。
+func set_skill_validation_speed(speed: int) -> bool:
+	if not _skill_validation_mode or not _skill_validation_current() or speed not in [1, 2]:
+		return false
+	_skill_validation_speed = speed
+	return true
+
+
+## 结果只读存副本；业务失败提示来自执行结果，不把入队 queued 当作施法 accepted。
+func _on_validation_cast(resolved: Dictionary) -> void:
+	if _leaving or resolved.get("battle_id") != _skill_validation_id:
+		return
+	last_cast_result = resolved.duplicate(true)
+	if controller._skill_full_input:
+		_skill_result_notice = _full_skill_result_text(resolved)
+		if resolved.get("reason") == "CONFIG_ERROR" and sim.finished and sim.reason == "skill_validation_error":
+			# Sim 先标记停场再发布拒绝，且没有结束事件。立即保存最终快照，随后由正常生命周期解绑。
+			_refresh_view(true)
+			return
+		_refresh_view()
+		return
+	if not resolved.get("accepted", false):
+		_toast = String(resolved.get("reason", ""))
+		_skill_result_notice = "执行拒绝：" + _toast
+	else:
+		# 唤醒实得只来自已完成结果，不以资源差减去自然恢复倒推。
+		var actual: float = 0.0
+		for effect: Dictionary in resolved.get("details", {}).get("effects", []):
+			actual += float(effect["actual_amount"])
+		_skill_result_notice = "执行成功：唤醒实得 %.1f 法力" % actual
+	_refresh_view()
+
+
+## 正式场只显示本场技能事务的实际结果，覆盖更早的普通命令拒绝。
+func _on_formal_cast(resolved: Dictionary) -> void:
+	if _leaving or resolved.get("battle_id") != sim.skill_battle_id:
+		return
+	last_cast_result = resolved.duplicate(true)
+	_skill_result_notice = _full_skill_result_text(resolved)
+	_toast = ""
+	if resolved.get("reason") == "CONFIG_ERROR" and sim.result == "error":
+		_view.call("set_notice", "战斗配置异常，本次未结算")
+	_refresh_view()
+
+
+## 按事件身份标记原施法者和技能，使用实际明细组织提示，保留事件中的原始值。
+func _full_skill_result_text(resolved: Dictionary) -> String:
+	var caster: BattleSim.Unit = sim.units.get(resolved["caster_id"])
+	var skill_id: String = resolved["skill_id"]
+	var skill_name := skill_id
+	var caster_name := "角色 %d" % resolved["caster_id"]
+	if caster != null:
+		caster_name = caster.display_name
+		for skill: Variant in caster.resolved_slots.values():
+			if skill is Dictionary and skill.get("skill_id") == skill_id and skill.get("name") is String:
+				skill_name = skill["name"]
+				break
+	var subject := "%s·%s" % [caster_name, skill_name]
+	var details: Dictionary = resolved["details"]
+	if not resolved["accepted"]:
+		_toast = resolved["reason"]
+		var explanation := String(BattleViewScript.REASON_TEXT.get(_toast, "无法施放"))
+		if details.has("cost"):
+			explanation += "，需 %s 法力" % BattleViewScript.skill_amount_text(float(details["cost"]), true)
+		elif details.has("seconds"):
+			explanation += "，剩余 %s 秒" % BattleViewScript.skill_amount_text(float(details["seconds"]), true)
+		return "执行拒绝：%s，%s" % [subject, explanation]
+	# 先分别汇总真实效果；先舍入单个目标会改变爆破总量。零收益仍是成功。
+	var effects: Array = details["effects"]
+	var actual := 0.0
+	var absorbed := 0.0
+	var excess := 0.0
+	for effect: Dictionary in effects:
+		actual += float(effect["actual_amount"])
+		absorbed += float(effect.get("absorbed_amount", 0.0))
+		excess += float(effect.get("overkill_amount", effect.get("overheal_amount", 0.0)))
+	var amount := BattleViewScript.skill_amount_text(actual)
+	var outcome := ""
+	match skill_id:
+		"mage.fire.fireball", "mage.fire.flame_burst":
+			if skill_id == "mage.fire.flame_burst":
+				outcome = "%d 个目标，" % effects.size()
+			outcome += "有效伤害 %s，吸收 %s，过量 %s" % [amount, BattleViewScript.skill_amount_text(absorbed), BattleViewScript.skill_amount_text(excess)]
+		"mage.fire.flame_barrier":
+			var action := String(effects[0]["shield_action"])
+			var label := String({"created": "建立", "replaced": "替换", "retained": "保留", "zero": "未生成"}[action])
+			outcome = "%s护盾，净增 %s" % [label, amount]
+		"priest.holy.greater_heal":
+			outcome = "有效治疗 %s，过量 %s" % [amount, BattleViewScript.skill_amount_text(excess)]
+		"mage.fire.evocation":
+			outcome = "实得 %s 法力" % BattleViewScript.skill_amount_text(actual, true)
+	return "执行成功：%s，%s" % [subject, outcome]
+
+
+## 先封住本地输入再断订阅和清本场队列；失效旧绑定不清理或暂停新场。
+func _close_skill_validation() -> void:
+	if not _skill_validation_mode:
+		return
+	_leaving = true
+	if events != null:
+		if events.cast_resolved.is_connected(_on_validation_cast):
+			events.cast_resolved.disconnect(_on_validation_cast)
+		if events.battle_ended.is_connected(_on_ended):
+			events.battle_ended.disconnect(_on_ended)
+	if controller != null:
+		controller.release_skill_validation()
+	if sim != null and not _skill_validation_id.is_empty() and sim.skill_battle_id == _skill_validation_id:
+		sim._leave_skill_schedule()
+	_skill_validation_id = ""
+	controller = null
+	sim = null
+	events = null
+
+
+## 读取控制器本地诊断；输入排队与执行结果分栏，不把 queued 提示为成功。
+func _skill_validation_input_notice(slot: String) -> void:
+	if not _skill_validation_current():
+		return
+	_skill_view_slot = slot.to_upper()
+	if controller.last_input.get("queued", false):
+		_skill_input_notice = "输入：已入队，待执行"
+	else:
+		# 旧夹具保留原提示，完整隔离场将同一本地诊断码转为中文。
+		var code := String(controller.last_input.get("reason", ""))
+		var explanation := String(BattleViewScript.REASON_TEXT.get(code, "输入不可用")) if controller._skill_full_input else code
+		_skill_input_notice = "输入拒绝：" + explanation

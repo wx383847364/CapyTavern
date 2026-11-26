@@ -24,6 +24,8 @@ static var from_tavern: bool = false
 static var run_id: String = ""
 ## 默认选中的槽位：队长。负数表示选第一名在场成员（旧入口）。
 static var captain_slot: int = -1
+## 仅酒馆成功预检后写入；战斗场景按 run_id 一次性领取，同场没有第二份 Sim。
+static var formal_sortie: Dictionary = {}
 
 
 static func default_slots(count: int) -> Array:

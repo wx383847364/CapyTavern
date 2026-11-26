@@ -1,0 +1,27 @@
+[gd_resource type="Resource" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/battle/skill_def.gd" id="1_skill"]
+[ext_resource type="Script" path="res://scripts/battle/skill_effect_def.gd" id="2_effect"]
+
+[sub_resource type="Resource" id="Effect_1"]
+script = ExtResource("2_effect")
+kind = "SHIELD"
+selector = "SELF"
+power_coeff = 1.5
+flat_amount = 0
+radius_m = 0
+duration_s = 6
+uses_stable_crit = false
+uses_mastery = false
+
+[resource]
+script = ExtResource("1_skill")
+skill_id = "mage.fire.flame_barrier"
+spec_id = "mage.fire"
+name = "烈焰屏障"
+icon = null
+target_kind = "SELF"
+cast_range_m = 0
+mana_cost = 20
+cooldown_s = 16
+effects = Array[ExtResource("2_effect")]([SubResource("Effect_1")])

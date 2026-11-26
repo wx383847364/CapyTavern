@@ -8,6 +8,8 @@ signal unit_spawned(unit_id, side, slot, class_id, max_hp, pos)
 signal command_issued(unit_id, kind, target_id, pos)
 signal command_rejected(unit_id, kind, reason)
 signal skill_cast(unit_id, skill_id, target_id, cost, cd_until)
+## 隔离事务同步全部结算后的一次纯数据结果，包含正常拒绝。
+signal cast_resolved(result)
 signal damage_dealt(source_id, target_id, amount, skill_id, is_crit, hp_after)
 signal heal_done(source_id, target_id, amount, effective, skill_id, hp_after)
 signal resource_changed(unit_id, kind, value, max)
@@ -27,6 +29,7 @@ const SCHEMA := {
 	"command_issued": ["unit_id", "kind", "target_id", "pos"],
 	"command_rejected": ["unit_id", "kind", "reason"],
 	"skill_cast": ["unit_id", "skill_id", "target_id", "cost", "cd_until"],
+	"cast_resolved": ["result"],
 	"damage_dealt": ["source_id", "target_id", "amount", "skill_id", "is_crit", "hp_after"],
 	"heal_done": ["source_id", "target_id", "amount", "effective", "skill_id", "hp_after"],
 	"resource_changed": ["unit_id", "kind", "value", "max"],

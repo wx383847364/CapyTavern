@@ -1,0 +1,8 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/battle/spec_loadout.gd" id="1_loadout"]
+
+[resource]
+script = ExtResource("1_loadout")
+spec_id = "priest.holy"
+slots = Array[String](["priest.holy.greater_heal", "", "", ""])

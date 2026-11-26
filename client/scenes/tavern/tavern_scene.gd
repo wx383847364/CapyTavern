@@ -15,6 +15,8 @@ const TavernUi := preload("res://scenes/ui/tavern_ui.gd")
 const StageText := preload("res://scripts/data/stage_text.gd")
 const SortieSession := preload("res://scripts/tavern/sortie_session.gd")
 const BattleLaunch := preload("res://scripts/battle/battle_launch.gd")
+const BattleSim := preload("res://scripts/battle/battle_sim.gd")
+const BattleEvents := preload("res://scripts/battle/battle_events.gd")
 const BattleConfig := preload("res://scripts/battle/battle_config.gd")
 const BATTLE_SCENE := "res://scenes/battle/battle.tscn"
 
@@ -33,15 +35,24 @@ var _toast: String = ""
 var _toast_until_ms: int = 0
 var _class_colors: Dictionary = {}
 var _loading: bool = false
+# 私有出征快照随确认生成，失败重试复用，公共 sortie_locked 的字段不变。
+var _formal_lock: Dictionary = {}
+var _formal_prepared: Dictionary = {}
 
 @onready var _view: Node2D = $View
 
 
+## 酒馆初始化沿用原规则；日志先于布局检查，失败退出有明确原因。
 func _ready() -> void:
+	TavernEvents.observe_window(get_tree().root)
+	TavernEvents.diagnostic("scene_entered", {"scene": scene_file_path})
 	var layout := TavernLayout.load_layout()
 	var problems := TavernLayout.validate(layout)
 	if not problems.is_empty():
 		push_error("酒馆布局不可用：" + "; ".join(problems))
+		get_tree().root.set_meta("capy_exit_reason", "invalid_tavern_layout")
+		get_tree().root.set_meta("capy_exit_initiator", "tavern_scene")
+		TavernEvents.diagnostic("exit_requested", {"initiator": "tavern_scene", "reason": "invalid_tavern_layout", "intended_code": 2})
 		get_tree().quit(2)
 		return
 	events = TavernEvents.new()
@@ -52,6 +63,9 @@ func _ready() -> void:
 	var geometry := _geometry_problems(layout)
 	if not geometry.is_empty():
 		push_error("酒馆布局几何不合法：" + "; ".join(geometry))
+		get_tree().root.set_meta("capy_exit_reason", "invalid_tavern_geometry")
+		get_tree().root.set_meta("capy_exit_initiator", "tavern_scene")
+		TavernEvents.diagnostic("exit_requested", {"initiator": "tavern_scene", "reason": "invalid_tavern_geometry", "intended_code": 2})
 		get_tree().quit(2)
 		return
 	controller = TavernController.new()
@@ -87,7 +101,9 @@ func _ready() -> void:
 	_show_return_notice()
 
 
+## 场景退出先flush原因再关闭业务日志；树退出不等同OS终止或崩溃。
 func _exit_tree() -> void:
+	TavernEvents.diagnostic("scene_exiting", {"scene": scene_file_path, "reason": get_tree().root.get_meta("capy_exit_reason", "scene_transition_or_unknown")})
 	if events != null:
 		events.close_log()
 
@@ -138,6 +154,12 @@ func _on_sortie_confirmed(_roster_list: Array) -> void:
 		"talents": options["talents"],
 		"sets": options["sets"],
 	}
+	_formal_lock = {}
+	var specs := BattleConfig.formal_specs(SortieSession.locked["slots"])
+	if not specs.is_empty():
+		_formal_lock = SortieSession.locked.duplicate(true)
+		_formal_lock["specs"] = specs
+		_formal_lock["equips"] = (service.state["equips"] as Dictionary).duplicate(true)
 	SortieSession.bus().fire(&"sortie_locked", [SortieSession.locked.duplicate(true)])
 	_load_battle()
 
@@ -149,7 +171,7 @@ func _load_battle() -> void:
 	_loading = true
 	ui.set_load_state("loading", "")
 	await get_tree().process_frame
-	var run_id := String(SortieSession.locked["run_id"])
+	var run_id := str(SortieSession.locked.get("run_id", ""))
 	var reason := _load_problem()
 	if reason != "":
 		_loading = false
@@ -157,6 +179,8 @@ func _load_battle() -> void:
 		ui.set_load_state("failed", reason)
 		return
 	var args := SortieSession.user_args()
+	BattleLaunch.formal_sortie = _formal_prepared
+	_formal_prepared = {}
 	BattleLaunch.slots = SortieSession.locked["slots"]
 	BattleLaunch.talents = SortieSession.locked["talents"]
 	BattleLaunch.sets = SortieSession.locked["sets"]
@@ -173,18 +197,94 @@ func _load_battle() -> void:
 	SortieSession.change_scene(get_tree(), BATTLE_SCENE)
 
 
-## 返回非空字符串表示加载失败的原因。
+## 酒馆完成所有可失败的预检。正式阵容失败时留在原面板，同 run_id 可重试。
 func _load_problem() -> String:
+	_formal_prepared = {}
 	if SortieSession.fail_load_left > 0:
 		SortieSession.fail_load_left -= 1
 		return "注入的加载失败（--fail-load）"
 	if not ResourceLoader.exists(BATTLE_SCENE):
 		return "战斗场景读不到"
-	var config := BattleConfig.load_config({"talents": SortieSession.locked["talents"], "sets": SortieSession.locked["sets"]})
-	var problems := BattleConfig.validate(config)
+	var locked := SortieSession.locked
+	var slots: Variant = locked.get("slots")
+	if not slots is Array or not locked.get("talents") is Dictionary or not locked.get("sets") is Array:
+		return "出征阵容、天赋或套装快照无效"
+	var specs := BattleConfig.formal_specs(slots)
+	var formal := not specs.is_empty() or not _formal_lock.is_empty()
+	var options := {"modifiers": false} if formal else {"talents": locked["talents"], "sets": locked["sets"]}
+	var config := BattleConfig.load_config(options)
+	if not formal:
+		var legacy_problems := BattleConfig.validate(config)
+		return "" if legacy_problems.is_empty() else "战斗配置不可用：" + "; ".join(legacy_problems)
+	var scene: Variant = load(BATTLE_SCENE)
+	if not scene is PackedScene or not scene.can_instantiate():
+		return "战斗场景读不到"
+	var lock_problem := _formal_lock_problem(specs)
+	if not lock_problem.is_empty():
+		return lock_problem
+	var problems := BattleConfig.formal_config_problems(config, slots)
 	if not problems.is_empty():
-		return "战斗配置不可用：" + "; ".join(problems)
+		return "正式战斗配置不可用：" + "; ".join(problems)
+	var catalog := BattleConfig.load_skill_catalog()
+	if not catalog["problems"].is_empty():
+		return "正式战斗技能源不可用：" + "; ".join(catalog["problems"])
+	var seed := -1
+	for arg in SortieSession.user_args():
+		if arg.begins_with("--seed="):
+			seed = int(arg.get_slice("=", 1))
+	# 候选战斗预建在树外；通过前没有出生、加载或奖励事件，交接时使用同一份 Sim。
+	var candidate := BattleSim.new()
+	problems = candidate.prepare_formal_sortie(config, _formal_lock, seed, BattleEvents.new(), catalog)
+	if not problems.is_empty() or not candidate.formal_skill_sortie:
+		return "正式战斗初始化失败：" + "; ".join(problems)
+	_formal_prepared = {"run_id": locked["run_id"], "slots": slots.duplicate(), "sim": candidate}
 	return ""
+
+
+## 用冻结装备及实际物品表复核套装快照，重试不读取当前穿戴或重做专精选择。
+func _formal_lock_problem(specs: Array) -> String:
+	var locked := SortieSession.locked
+	if specs.is_empty() or _formal_lock.get("specs") != specs:
+		return "正式出征的专精快照无效"
+	if not _formal_lock.get("run_id") is String or _formal_lock["run_id"].is_empty() or table.slots.is_empty():
+		return "正式出征的场次或物品表无效"
+	for key: String in ["run_id", "slots", "captain", "captain_slot", "talents", "sets"]:
+		if _formal_lock.get(key) != locked.get(key):
+			return "正式出征快照不一致：" + key
+	var slot: Variant = _formal_lock.get("captain_slot")
+	var slots: Array = _formal_lock["slots"]
+	if not slot is int or slot < 0 or slot >= slots.size() or slots[slot] == "" or slots[slot] != _formal_lock.get("captain"):
+		return "正式出征的队长快照无效"
+	var equips: Variant = _formal_lock.get("equips")
+	if not equips is Dictionary or equips.size() != slots.size() - slots.count(""):
+		return "正式出征的装备快照无效"
+	var sets: Array = []
+	for class_id: String in slots:
+		if class_id.is_empty():
+			continue
+		if _formal_lock["talents"].get(class_id) not in ["t1", "t2"]:
+			return "正式出征的天赋快照无效：" + class_id
+		var worn: Variant = equips.get(class_id)
+		if not worn is Dictionary or worn.size() != table.slots.size():
+			return "正式出征的装备槽缺失：" + class_id
+		var pieces := {}
+		for slot_id: String in table.slots:
+			if not worn.get(slot_id) is String:
+				return "正式出征的装备标识无效：" + class_id
+			var item := table.item(worn[slot_id])
+			if item.get("class_id") != class_id or item.get("slot") != slot_id:
+				return "正式出征的装备不匹配：" + class_id
+			var set_id: Variant = item.get("set_id")
+			if set_id is String and not set_id.is_empty():
+				pieces[set_id] = int(pieces.get(set_id, 0)) + 1
+		for count: int in pieces.values():
+			if count >= 2:
+				sets.append(class_id)
+				break
+	var frozen_sets: Array = _formal_lock["sets"].duplicate()
+	frozen_sets.sort()
+	sets.sort()
+	return "" if frozen_sets == sets else "正式出征的套装快照不一致"
 
 
 func _load_class_colors() -> void:
@@ -261,14 +361,25 @@ func _on_left_click(pos: Vector2) -> void:
 	_show_result(controller.on_left_click(pos))
 
 
+## 记录真实请求及面板响应；正式阵容的短提示仅补充面板内常驻说明。
 func _on_open_requested(kind: String) -> void:
+	TavernEvents.diagnostic("ui_open_requested", {"kind": kind})
 	sim.open_panel(kind)
-	_refresh_view()
+	var specs := BattleConfig.formal_specs(service.battle_slots()) if kind in ["prepare", "sortie"] else []
+	if specs.is_empty():
+		_refresh_view()
+	else:
+		var party_name := "法师与牧师" if specs.has("priest.holy") else "法师"
+		_toast_text(party_name + "已启用正式专精，技能与套装规则见面板", 7000)
+	TavernEvents.diagnostic("ui_panel_response", {"kind": sim.panel})
 
 
+## 原关闭面板逻辑保持，额外记录请求及实际结果。
 func _on_close_requested() -> void:
+	TavernEvents.diagnostic("ui_close_requested", {"kind": sim.panel})
 	sim.close_panel()
 	_refresh_view()
+	TavernEvents.diagnostic("ui_panel_response", {"kind": sim.panel})
 
 
 func _on_party_changed() -> void:

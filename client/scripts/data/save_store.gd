@@ -47,29 +47,39 @@ func quarantine() -> String:
 	return target
 
 
-## 成功返回 OK；失败返回错误码，原文件保持写入前内容。
+## 成功返回 OK；失败返回原错误码，原文件保持写入前内容，仅向标准输出记录失败阶段、错误码及注入标识。
 func write(state: Dictionary) -> Error:
 	if fail_next_write:
 		fail_next_write = false
+		print("save_write_failed stage=inject_next error=%d injected=true" % ERR_FILE_CANT_WRITE)
 		return ERR_FILE_CANT_WRITE
 	if fail_writes > 0:
 		fail_writes -= 1
+		print("save_write_failed stage=inject_count error=%d injected=true" % ERR_FILE_CANT_WRITE)
 		return ERR_FILE_CANT_WRITE
 	var absolute := ProjectSettings.globalize_path(path)
 	var made := DirAccess.make_dir_recursive_absolute(absolute.get_base_dir())
 	if made != OK and not DirAccess.dir_exists_absolute(absolute.get_base_dir()):
+		print("save_write_failed stage=mkdir error=%d injected=false" % made)
 		return made
 	var tmp := absolute + ".tmp"
 	var file := FileAccess.open(tmp, FileAccess.WRITE)
 	if file == null:
-		return FileAccess.get_open_error()
+		# 先捕获本次打开的原始错误；日志不能影响后续取值或改变返回码。
+		var open_error := FileAccess.get_open_error()
+		print("save_write_failed stage=open error=%d injected=false" % open_error)
+		return open_error
 	file.store_string(JSON.stringify(state, "\t", true) + "\n")
 	var write_error := file.get_error()
 	file.close()
 	if write_error != OK:
 		DirAccess.remove_absolute(tmp)
+		# 保留原临时文件清理顺序；以捕获的写入错误取证，不用文件残留推断阶段。
+		print("save_write_failed stage=write error=%d injected=false" % write_error)
 		return write_error
 	var renamed := DirAccess.rename_absolute(tmp, absolute)
 	if renamed != OK:
 		DirAccess.remove_absolute(tmp)
+		# 清理可能删除临时文件，但输出与返回仍使用原改名错误。
+		print("save_write_failed stage=rename error=%d injected=false" % renamed)
 	return renamed

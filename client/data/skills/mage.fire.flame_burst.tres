@@ -1,0 +1,27 @@
+[gd_resource type="Resource" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/battle/skill_def.gd" id="1_skill"]
+[ext_resource type="Script" path="res://scripts/battle/skill_effect_def.gd" id="2_effect"]
+
+[sub_resource type="Resource" id="Effect_1"]
+script = ExtResource("2_effect")
+kind = "MAGIC_DAMAGE"
+selector = "ENEMIES_AROUND_PRIMARY"
+power_coeff = 1.7
+flat_amount = 0
+radius_m = 2
+duration_s = 0
+uses_stable_crit = true
+uses_mastery = false
+
+[resource]
+script = ExtResource("1_skill")
+skill_id = "mage.fire.flame_burst"
+spec_id = "mage.fire"
+name = "烈焰爆破"
+icon = null
+target_kind = "ENEMY"
+cast_range_m = 8
+mana_cost = 25
+cooldown_s = 8
+effects = Array[ExtResource("2_effect")]([SubResource("Effect_1")])

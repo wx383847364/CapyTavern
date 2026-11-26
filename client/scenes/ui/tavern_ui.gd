@@ -6,6 +6,8 @@ extends Node
 
 const TavernRoster := preload("res://scripts/tavern/tavern_roster.gd")
 const CjkFont := preload("res://scenes/ui/cjk_font.gd")
+const BattleConfig := preload("res://scripts/battle/battle_config.gd")
+const SortieSession := preload("res://scripts/tavern/sortie_session.gd")
 
 signal open_requested(kind: String)
 signal close_requested
@@ -18,6 +20,8 @@ signal retry_load_requested
 const PANEL_RECT := Rect2(360, 80, 1200, 860)
 const TITLE := {"recruit": "招募伙伴", "prepare": "整备队伍", "sortie": "准备出征"}
 const FAIL_TEXT := "未保存，本次修改未生效"
+const FORMAL_TALENT_TEXT := "旧天赋保留选择，本批不生效"
+const FORMAL_SET_TEXT := "两件套仅使各自 Q 的原始伤害或治疗量 +5%"
 const REASON_TEXT := {
 	"already_recruited": "已经在队伍里了",
 	"no_free_slot": "队伍已满（4/4）",
@@ -155,6 +159,7 @@ func _set_panel_visible(shown: bool) -> void:
 
 # ── 控件小工具 ──
 
+## 保留原pressed业务绑定；诊断只旁听真实GUI与pressed，不消费或重发输入。
 func _button(parent: Node, text: String, action: Callable, node_name: String = "", disabled: bool = false) -> Button:
 	var btn := Button.new()
 	btn.text = text
@@ -163,8 +168,21 @@ func _button(parent: Node, text: String, action: Callable, node_name: String = "
 	if node_name != "":
 		btn.name = node_name
 	btn.pressed.connect(action)
+	btn.gui_input.connect(_diagnostic_gui.bind(btn))
+	btn.pressed.connect(_diagnostic_pressed.bind(btn))
 	parent.add_child(btn)
 	return btn
+
+
+## 只记录按钮事件边沿，忽略高频motion，保留按钮局部坐标及来源未知事实。
+func _diagnostic_gui(event: InputEvent, button: Button) -> void:
+	if event is InputEventMouseButton:
+		preload("res://scripts/tavern/tavern_events.gd").diagnostic("ui_mouse_button", {"control": String(button.name), "event_id": event.get_instance_id(), "pressed": event.pressed, "button": event.button_index, "position": str(event.position), "window_id": event.window_id, "origin": "unknown"})
+
+
+## 真实pressed信号旁听；不自行触发业务动作或改变原连接执行顺序。
+func _diagnostic_pressed(button: Button) -> void:
+	preload("res://scripts/tavern/tavern_events.gd").diagnostic("ui_pressed", {"control": String(button.name)})
 
 
 func _label(parent: Node, text: String, size: int = 20, color: Color = Color.WHITE) -> Label:
@@ -388,6 +406,7 @@ func _recruit(class_id: String) -> void:
 
 # ── 整备面板 ──
 
+## 整备按实际出征槽位识别正式专精，切换查看职业时重新取该槽的说明。
 func _build_prepare() -> void:
 	if roster.party_count() == 0:
 		_label(_body, "还没有队员，先去招募第一名队员。", 24, Color(1, 0.9, 0.6))
@@ -395,12 +414,14 @@ func _build_prepare() -> void:
 		return
 	if _target == "" or not roster.service.is_recruited(_target):
 		_target = roster.inspected_class()
+	var specs := BattleConfig.formal_specs(roster.service.battle_slots())
+	var spec_id := String(specs[roster.service.slot_of(_target)]) if not specs.is_empty() else ""
 	_build_prepare_heads()
 	var cols := _hbox(_body, "prepare_cols")
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_build_member_column(_vbox(cols, 360, "col_member"))
+	_build_member_column(_vbox(cols, 360, "col_member"), spec_id)
 	_build_equip_column(_vbox(cols, 400, "col_equip"))
-	_build_talent_column(_vbox(cols, 380, "col_talent"))
+	_build_talent_column(_vbox(cols, 380, "col_talent"), not spec_id.is_empty())
 	var foot := _hbox(_body, "prepare_foot")
 	if _prepare_return == "sortie":
 		_button(foot, "返回出征", func() -> void: open_requested.emit("sortie"), "prepare_back_sortie")
@@ -438,19 +459,40 @@ func _view_member(class_id: String) -> void:
 	_dirty = true
 
 
-func _build_member_column(col: VBoxContainer) -> void:
+## 保留当前套装件数；正式出征在原技能区显示实际四槽和该职业套装的适用范围。
+func _build_member_column(col: VBoxContainer, spec_id: String) -> void:
 	var view := roster.member_view(_target)
 	_label(col, "%s%s" % [String(view["name"]), "（队长）" if bool(view["captain"]) else ""], 28, roster.class_color(_target).lerp(Color.WHITE, 0.4))
 	_label(col, "生命 %d　护甲 %d　魔抗 %d　移速 %d" % [view["max_hp"], view["armor"], view["magic_resist"], view["speed"]], 17, DIM)
 	_label(col, "资源：%s　%s" % [String(view["resource"]), String(view["attack"])], 17, DIM)
 	var status: Dictionary = view["set"]
 	_label(col, "套装：%s" % String(status["text"]), 18, GOOD if bool(status["active"]) else DIM).name = "set_status"
+	if not spec_id.is_empty():
+		var amount := "原始治疗量" if _target == "priest" else "原始伤害"
+		_label(col, "两件套仅使本职业 Q 的%s +5%%" % amount, 17, DIM).name = "formal_set_rule"
 	var target := _target
 	var captain_btn := _button(col, "已是队长" if bool(view["captain"]) else "设为队长", func() -> void: _run(func() -> Dictionary: return roster.service.set_captain(target), "已将 %s 设为队长" % roster.class_name_of(target)), "set_captain", bool(view["captain"]))
 	captain_btn.custom_minimum_size = Vector2(0, 44)
+	if not spec_id.is_empty():
+		_label(col, "本次出征技能", 18, DIM)
+		_label(col, _formal_skill_text(spec_id, "\n"), 17).name = "formal_skills"
+		return
 	_label(col, "技能（含当前天赋与套装）", 18, DIM)
 	for skill: Dictionary in view["skills"]:
 		_label(col, "[%s] %s\n    %s" % [skill["key"], skill["name"], skill["text"]], 17)
+
+
+## 从正式专精资源读取名称和空槽；读取失败时明确提示，避免回落到旧技能。
+func _formal_skill_text(spec_id: String, separator: String = "　") -> String:
+	var resolved := BattleConfig.resolve_spec(BattleConfig.load_skill_catalog(), spec_id)
+	if not resolved["problems"].is_empty():
+		return "正式专精技能暂不可用"
+	var slots: Dictionary = resolved["slots"]
+	var lines := PackedStringArray()
+	for key: String in ["q", "w", "e", "r"]:
+		var skill: Dictionary = slots[key]
+		lines.append("%s %s" % [key.to_upper(), skill.get("name", "空槽")])
+	return separator.join(lines)
 
 
 func _build_equip_column(col: VBoxContainer) -> void:
@@ -500,19 +542,23 @@ func _equip_previewed() -> void:
 	_run(func() -> Dictionary: return roster.service.equip(target, item_id), "已装备 %s" % roster.item_name(item_id), func(_r: Dictionary) -> void: _preview_item = "")
 
 
-func _build_talent_column(col: VBoxContainer) -> void:
+## 正式出征仍可保存天赋选择，旧效果预览仅展示给使用旧规则的阵容。
+func _build_talent_column(col: VBoxContainer, formal: bool) -> void:
 	_label(col, "天赋（二选一）", 22, DIM)
+	if formal:
+		_label(col, FORMAL_TALENT_TEXT, 18, DIM).name = "formal_talent_rule"
 	var names := {"t1": "天赋一", "t2": "天赋二"}
 	for option: Dictionary in roster.talent_options(_target):
 		var talent := String(option["id"])
 		_label(col, "%s%s" % [String(names.get(talent, talent)), "（当前）" if bool(option["active"]) else ""], 22, GOOD if bool(option["active"]) else Color.WHITE)
-		var joined_text := ""
-		for line: Dictionary in option["lines"]:
-			var l := _label(col, "%s %s" % ["▲" if bool(line["good"]) else "▼", String(line["text"])], 18, GOOD if bool(line["good"]) else BAD)
-			joined_text += String(line["text"])
-		for skill: Dictionary in option["skills"]:
-			if joined_text.contains(String(skill["name"])):
-				_label(col, "→ 最终：%s　%s" % [skill["name"], skill["text"]], 16, DIM)
+		if not formal:
+			var joined_text := ""
+			for line: Dictionary in option["lines"]:
+				_label(col, "%s %s" % ["▲" if bool(line["good"]) else "▼", String(line["text"])], 18, GOOD if bool(line["good"]) else BAD)
+				joined_text += String(line["text"])
+			for skill: Dictionary in option["skills"]:
+				if joined_text.contains(String(skill["name"])):
+					_label(col, "→ 最终：%s　%s" % [skill["name"], skill["text"]], 16, DIM)
 		var btn := _button(col, "当前天赋" if bool(option["active"]) else "选择", func() -> void: _pick_talent(talent), "talent_" + talent, bool(option["active"]))
 		btn.custom_minimum_size = Vector2(0, 40)
 
@@ -524,17 +570,24 @@ func _pick_talent(talent: String) -> void:
 
 # ── 出征面板 ──
 
+## 加载与重试时用已锁定阵容，确认前用实时四槽；领奖页沿用原内容。
 func _build_sortie() -> void:
-	match _sortie_mode:
-		"reward":
-			_build_reward()
-		"locked":
-			_build_locked()
-		_:
-			_build_sortie_main()
+	if _sortie_mode == "reward":
+		_build_reward()
+		return
+	var locked := _sortie_mode == "locked"
+	var slots: Array = SortieSession.locked.get("slots", []) if locked else roster.service.battle_slots()
+	var specs := BattleConfig.formal_specs(slots)
+	if not specs.is_empty():
+		_label(_body, "%s；%s" % [FORMAL_TALENT_TEXT, FORMAL_SET_TEXT], 18, DIM).name = "formal_sortie_rules"
+	if locked:
+		_build_locked(specs)
+	else:
+		_build_sortie_main(specs)
 
 
-func _build_sortie_main() -> void:
+## 正式阵容在各自出战行下展示实际技能，不改变前置检查和整备入口。
+func _build_sortie_main(specs: Array) -> void:
 	var view := roster.sortie_view()
 	var stage: Dictionary = view["stage"]
 	var cols := _hbox(_body, "sortie_cols")
@@ -564,6 +617,9 @@ func _build_sortie_main() -> void:
 		var info := _label(row, text, 20, BAD if bool(entry["flagged"]) else Color.WHITE)
 		info.custom_minimum_size = Vector2(470, 0)
 		_button(row, "整备", func() -> void: _open_prepare_for(class_id, "sortie"), "sortie_prepare_%d" % int(entry["number"]))
+		if not specs.is_empty():
+			var spec_id := String(specs[int(entry["slot"])])
+			_label(right, _formal_skill_text(spec_id), 17, DIM).name = "formal_sortie_skills_%d" % int(entry["number"])
 	_label(right, String(view["hint"]), 16, DIM)
 	_label(_body, String(view["summary"]), 22, GOOD if bool(view["ok"]) else Color(1, 0.9, 0.6)).name = "sortie_summary"
 	for blocker: Dictionary in view["blockers"]:
@@ -595,11 +651,15 @@ func _confirm_sortie() -> void:
 		sortie_confirmed.emit(_locked_roster))
 
 
-func _build_locked() -> void:
+## 加载失败留在已锁定名单，正式技能说明继续对应锁定时的槽位。
+func _build_locked(specs: Array) -> void:
 	_label(_body, "前置检查通过，最新配置已保存", 28, GOOD).name = "locked_title"
 	_label(_body, "已锁定的出战名单（按战斗快捷键 1–4 顺序）：", 20, DIM)
 	for entry: Dictionary in _locked_roster:
 		_label(_body, "%d  %s%s　%s　天赋 %s" % [entry["slot"], entry["name"], " ★队长" if bool(entry["captain"]) else "", entry["set_text"], entry["talent"]], 22)
+		if not specs.is_empty():
+			var spec_id := String(specs[int(entry["slot"]) - 1])
+			_label(_body, _formal_skill_text(spec_id), 17, DIM).name = "formal_sortie_skills_%d" % int(entry["slot"])
 	if _load_state == "loading":
 		_label(_body, "正在前往 %s …" % String(roster.stage_view()["name"]), 26, Color(1, 0.9, 0.6)).name = "loading_text"
 	elif _load_state == "failed":
