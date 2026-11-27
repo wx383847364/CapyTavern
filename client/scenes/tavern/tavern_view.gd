@@ -76,6 +76,12 @@ func captain_body_at(pos: Vector2) -> bool:
 	return true
 
 
+## 脚下命中与本体共用本帧接地点，保留原有的地面半径。
+func captain_at(pos: Vector2) -> bool:
+	return bool(_snapshot.get("has_captain", false)) and (
+		pos.distance_to(_snapshot["pos"]) <= _captain_radius or captain_body_at(pos))
+
+
 func reason_text(reason: String) -> String:
 	return String(REASON_TEXT.get(reason, ""))
 

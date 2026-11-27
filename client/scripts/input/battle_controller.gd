@@ -17,7 +17,9 @@ var _skill_request_seq: int = 0
 ## 只记录接收诊断，执行结果由场景订阅 cast_resolved 单独保存。
 var last_input: Dictionary = {}
 const PREFS_PATH := "user://battle_preferences.cfg"
-const PREF_DEFAULTS := {"names": false, "release_cast": false, "tab_health": false}
+const FPS_CHOICES := [0, 60, 120, 240, 480, 720, 1000]
+const RESOLUTION_CHOICES := [0, 720, 1080, 1440, 2160]
+const PREF_DEFAULTS := {"names": false, "release_cast": false, "tab_health": false, "fps": 0, "resolution": 0}
 var preferences := PREF_DEFAULTS.duplicate()
 var _tab_ids: Array[int] = []
 var _tab_next: int = 0
@@ -104,16 +106,34 @@ func load_preferences(path: String = PREFS_PATH) -> void:
 		return
 	for key in PREF_DEFAULTS:
 		var value: Variant = config.get_value("battle", key, PREF_DEFAULTS[key])
-		if value is bool:
+		if _valid_preference(key, value):
 			preferences[key] = value
 
 
-## 优先持久化再更新面板状态；写失败时调用方可显示明确提示。
+## 旧版开关仍按原入口切换，显示档位使用明确的档位值。
 func toggle_preference(key: String, path: String = PREFS_PATH) -> bool:
-	if not preferences.has(key):
+	if not preferences.get(key) is bool:
+		return false
+	return set_preference(key, not preferences[key], path)
+
+
+## 只接受面板支持的档位或已有开关，坏配置回到跟随系统。
+static func _valid_preference(key: String, value: Variant) -> bool:
+	match key:
+		"fps":
+			return value is int and value in FPS_CHOICES
+		"resolution":
+			return value is int and value in RESOLUTION_CHOICES
+		_:
+			return PREF_DEFAULTS.get(key) is bool and value is bool
+
+
+## 优先持久化再更新面板状态；写失败时保留原设置。
+func set_preference(key: String, value: Variant, path: String = PREFS_PATH) -> bool:
+	if not _valid_preference(key, value):
 		return false
 	var updated := preferences.duplicate()
-	updated[key] = not updated[key]
+	updated[key] = value
 	var config := ConfigFile.new()
 	for option in updated:
 		config.set_value("battle", option, updated[option])

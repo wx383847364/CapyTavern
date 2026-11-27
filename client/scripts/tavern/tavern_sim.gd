@@ -18,6 +18,7 @@ var nav: TavernNav = TavernNav.new()
 var time: float = 0.0
 
 var has_captain: bool = false
+var captain_generation := 0
 var captain_class: String = ""
 var captain_pos: Vector2 = Vector2.ZERO
 ## 朝向（弧度），换队长时保持。
@@ -58,7 +59,9 @@ func setup(tavern_layout: Dictionary, bus: TavernEvents) -> void:
 
 # ── 队长 ──
 
+## 每次生成都开启新的实体代次，同一位置重生也不能复用旧轨道。
 func spawn_captain(class_id: String, pos: Vector2) -> void:
+	captain_generation += 1
 	has_captain = true
 	captain_class = class_id
 	captain_pos = pos
@@ -241,7 +244,8 @@ func _in_range(info: Dictionary) -> bool:
 
 # ── 推进 ──
 
-func step(dt: float) -> void:
+## 推进权威移动，可将本步实际抵达的路点写入调用方的显示缓冲。
+func step(dt: float, corners := PackedVector2Array()) -> void:
 	time += dt
 	events.now = time
 	if path.is_empty() or panel != "":
@@ -272,6 +276,9 @@ func step(dt: float) -> void:
 		captain_pos = next_pos
 		moved = true
 		if arrived_point:
+			# 只记录实际抵达的转折，目的地由最终位置提供。
+			if path_index + 1 < path.size():
+				corners.append(next_pos)
 			path_index += 1
 	if moved:
 		events.fire(&"tavern_captain_moved", [captain_pos])

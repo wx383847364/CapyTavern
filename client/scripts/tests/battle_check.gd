@@ -85,9 +85,128 @@ func _run_all() -> void:
 	_frost_cases()
 	_approach_cases()
 	_ground_cast_cases()
+	for fps: int in [60, 120]:
+		_motion_scene_case(fps)
+		_remote_motion_case(fps)
 	for primary_index: int in [0, 2, 3]:
 		_player_whirlwind_case(primary_index, false)
 	_player_whirlwind_case(0, true)
+
+
+## 使用实际战斗推进、View 和命中入口，覆盖玩家、自动追击的敌人及多人交叉走位。
+func _motion_scene_case(fps: int) -> void:
+	var fixture := _make(["warrior", "rogue", "mage", "priest"], 77)
+	var scene := BattleSceneScript.new()
+	var view := BattleViewScript.new()
+	scene._view = view
+	scene.sim = fixture.sim
+	scene.controller = fixture.controller
+	var sim := scene.sim
+	var player := sim.slot_unit(0)
+	var ally := sim.slot_unit(1)
+	var enemy: BattleSim.Unit = sim.living("enemy")[0]
+	sim.player_controls = true
+	sim.set_controlled_actor(player.id)
+	player.pos = Vector2(650, 450)
+	ally.pos = Vector2(775, 560)
+	enemy.pos = Vector2(1200, 550)
+	sim.order_move(player.id, Vector2(650, 800))
+	sim.order_move(ally.id, Vector2(775, 220))
+	scene._refresh_view()
+	var previous := {}
+	var continuous := true
+	var hit := true
+	var ordered := true
+	for frame in fps:
+		scene._process(1.0 / fps)
+		for actor: BattleSim.Unit in [player, ally, enemy]:
+			var pos: Vector2 = view._by_id[actor.id].pos
+			if frame > fps / 5:
+				var distance := pos.distance_to(previous[actor.id])
+				continuous = continuous and distance > 0.01 and distance <= actor.speed / fps + 0.02
+			previous[actor.id] = pos
+			hit = hit and view.hit_test(pos).get("id") == actor.id
+		for j in range(1, view._live_units.size()):
+			ordered = ordered and view._live_units[j - 1].pos.y <= view._live_units[j].pos.y
+		for unit: Dictionary in view._world_labels:
+			hit = hit and view.hit_test(view._world_label_rect(unit).get_center()).get("id") == unit.id
+	_check("%d FPS 玩家、队友及无人操作敌方逐帧移动" % fps, continuous)
+	_check("%d FPS 交叉走位的排序、本体和头顶元素命中一致" % fps, ordered and hit and previous[player.id].y > previous[ally.id].y)
+	# 只给战士开怪命令，监看未被选中过的法师自行追击。
+	sim.ally_ai_enabled = true
+	var mage := sim.slot_unit(2)
+	scene.controller.player_right_click(enemy.pos, enemy.id)
+	var ai_moves := 0
+	var last: Vector2 = view._by_id[mage.id].pos
+	for frame in roundi(fps * 0.4):
+		scene._process(1.0 / fps)
+		var pos: Vector2 = view._by_id[mage.id].pos
+		if pos.distance_to(last) > 0.01:
+			ai_moves += 1
+		last = pos
+	_check("%d FPS 未接收指令的队友 AI 自行逐帧移动" % fps, mage.ai_joined and ai_moves >= roundi(fps * 0.3))
+	var landing := Vector2(500, 500)
+	sim._apply_effect(mage, null, "mage.frost.blink", {"kind": "blink"}, {"point": landing}, [])
+	scene._refresh_view()
+	var landed: bool = view._by_id[mage.id].pos == landing
+	scene._process(0.001)
+	_check("两次模拟步之间闪现，下一帧只在新段移动", landed and landing.distance_to(view._by_id[mage.id].pos) <= mage.speed * 0.001 + 0.001)
+	var scope := sim.get_instance_id()
+	var remote := scene.open_remote_motion(scope, enemy.id, 1, 0.1, 0.25)
+	remote.receive(scope, 1, enemy.id, 10.0, Vector2(920, 410), 0, 2.0)
+	remote.receive(scope, 1, enemy.id, 10.1, Vector2(940, 410), 0, 2.05)
+	scene._sample_positions(2.15)
+	scene._refresh_view()
+	_check("%d FPS 同步源使用正式 View 和命中，权威坐标独立" % fps,
+		view._by_id[enemy.id].pos.is_equal_approx(Vector2(930, 410)) and view.hit_test(Vector2(930, 410)).get("id") == enemy.id and enemy.pos.distance_to(Vector2(930, 410)) > 50.0)
+	var next := scene.open_remote_motion(scope, enemy.id, 2, 0.1, 0.25)
+	scene._sample_positions(2.16)
+	_check("重连等待首包时保留画面，旧代次不能重新绑定", next != null and scene._display_positions[enemy.id].is_equal_approx(Vector2(930, 410)) and scene.open_remote_motion(scope, enemy.id, 1, 0.1, 0.25) == null)
+	next.receive(scope, 2, enemy.id, 0.0, Vector2(450, 250), 0, 2.17)
+	scene._sample_positions(2.17)
+	_check("重连可从新的源时间和位置开始", scene._display_positions[enemy.id] == Vector2(450, 250))
+	view.free()
+	scene.free()
+
+
+## 合成远端乱序、短缺、传送丢首包及断流；所有时钟可复现。
+func _remote_motion_case(fps: int) -> void:
+	var track := BattleSceneScript.MotionTrack.new(4, 7, 12, 0.1, 0.25)
+	var dt := 1.0 / fps
+	track.receive(4, 7, 12, 0.0, Vector2.ZERO, 0, 0.0)
+	for frame in range(1, roundi(0.15 * fps) + 1):
+		# 在首个有效播放帧之前收到第二个端点。
+		if frame == floori(0.1 * fps) + 1:
+			track.receive(4, 7, 12, 0.2, Vector2(20, 0), 0, 0.105)
+		track.remote_position(frame * dt)
+	var before := track.displayed
+	var accepted := track.receive(4, 7, 12, 0.1, Vector2(10, 5), 0, 0.15)
+	var rejected := not track.receive(4, 7, 12, 0.1, Vector2.ZERO, 0, 0.15)
+	rejected = rejected and not track.receive(4, 6, 12, 0.16, Vector2.ZERO, 0, 0.15) and not track.receive(3, 7, 12, 0.16, Vector2.ZERO, 0, 0.15)
+	rejected = rejected and not track.receive(4, 7, 11, 0.16, Vector2.ZERO, 0, 0.15) and not track.receive(4, 7, 12, 0.025, Vector2.ZERO, 0, 0.15)
+	var seam := track.remote_position(0.15)
+	var first := track.remote_position(0.15 + dt)
+	_check("%d FPS 迟到路点从已画坐标连续接上，过滤重复、已播和错误身份" % fps, accepted and rejected and before.is_equal_approx(Vector2(5, 0)) and seam.is_equal_approx(before) and first.is_equal_approx(before.lerp(Vector2(10, 5), dt / 0.05)))
+	for frame in range(roundi(0.15 * fps) + 2, roundi(0.35 * fps) + 1):
+		track.remote_position(frame * dt)
+	var stopped := track.displayed == Vector2(20, 0)
+	# 缓冲已空，恢复包在断流阈值之前到达。
+	track.receive(4, 7, 12, 0.35, Vector2(35, 0), 0, 0.35)
+	var clock_before := track.cursor
+	var resumed := track.remote_position(0.35 + dt)
+	_check("%d FPS 短缺停在末点，恢复播放速度上限 1.10" % fps, stopped and is_equal_approx(track.cursor - clock_before, dt * 1.10) and resumed.is_equal_approx(Vector2(20 + 110 * dt, 0)))
+	track.receive(4, 7, 12, 0.4, Vector2(500, 0), 1, 0.36)
+	var teleport_ok := true
+	for frame in range(roundi(0.35 * fps) + 2, roundi(0.55 * fps) + 1):
+		var pos := track.remote_position(frame * dt)
+		teleport_ok = teleport_ok and (pos.x <= 35.001 or pos.x == 500)
+	_check("%d FPS 丢掉传送首包后仍识别新段号" % fps, teleport_ok and track.displayed.x == 500)
+	track.receive(4, 7, 12, 1.0, Vector2(800, 0), 1, 1.0)
+	_check("%d FPS 长断流重建基线，旧包不能复活" % fps, track.remote_position(1.0).x == 800 and not track.receive(4, 7, 12, 0.9, Vector2.ZERO, 1, 1.01))
+	track.receive(4, 7, 12, 1.2, Vector2(820, 0), 1, 1.05)
+	var stale := track.receive(4, 7, 12, 1.1, Vector2(810, 0), 1, 1.55)
+	track.receive(4, 7, 12, 1.22, Vector2(822, 0), 1, 1.56)
+	_check("渲染也暂停时迟到路点不能掩盖长断流", not stale and track.remote_position(1.56).x == 822)
 
 
 ## 固定站位和敌方计时，只让被测 AI 执行真实命令和结算。

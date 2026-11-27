@@ -2,11 +2,13 @@ extends Node2D
 ## 战斗场景驱动：建模拟器、按固定步长推进、把鼠标键盘交给控制器、把快照交给画面。
 ## 结算只在 BattleSim 里发生；这里不算伤害，也不读任何动画回调。
 
+const MotionTrack := preload("res://scenes/ui/motion_track.gd")
 const BattleSim := preload("res://scripts/battle/battle_sim.gd")
 const BattleEvents := preload("res://scripts/battle/battle_events.gd")
 const BattleConfig := preload("res://scripts/battle/battle_config.gd")
 const BattleLaunch := preload("res://scripts/battle/battle_launch.gd")
 const BattleController := preload("res://scripts/input/battle_controller.gd")
+const DisplayOptionsScript := preload("res://scripts/input/display_options.gd")
 const BattleViewScript := preload("res://scenes/ui/battle_view.gd")
 const BattleBot := preload("res://scripts/input/battle_bot.gd")
 const SaveStore := preload("res://scripts/data/save_store.gd")
@@ -25,6 +27,11 @@ var controller: BattleController
 var bot: BattleBot
 var _tick: float = 0.05
 var _accumulator: float = 0.0
+var _local_tracks: Dictionary[int, MotionTrack] = {}
+var _remote_tracks: Dictionary[int, MotionTrack] = {}
+var _display_positions: Dictionary[int, Vector2] = {}
+var _completed_time := -INF
+var _stepping := false
 var _toast: String = ""
 var _toast_until_ms: int = 0
 var _config: Dictionary = {}
@@ -37,6 +44,7 @@ var _outcome: String = ""
 
 ## 隔离 View 须显式开启并在绑定前提供现有脚本节点；默认场景仍取得原节点。
 @onready var _view: Node2D = get_node_or_null("View")
+@onready var _display_options := get_node_or_null("/root/DisplayOptions") as DisplayOptionsScript
 var _skill_validation_view: bool = false
 var _skill_view_slot: String = "R"
 var _skill_input_notice: String = ""
@@ -141,7 +149,7 @@ func _ready() -> void:
 	_refresh_view()
 
 
-## 隔离模式直接交真实帧时间给已验调度，不另积时或截断；默认推进正文保留。
+## 隔离模式交给独立调度器；实际战斗在完整模拟步后提交位置，再按渲染帧播放。
 func _process(delta: float) -> void:
 	_skill_lifecycle_started = true
 	if _skill_validation_mode:
@@ -159,14 +167,58 @@ func _process(delta: float) -> void:
 	_accumulator += minf(delta, 0.25)
 	while _accumulator >= _tick:
 		_accumulator -= _tick
+		_stepping = true
 		if bot != null:
 			bot.tick()
 		sim.step(_tick)
+		_stepping = false
+		if sim.time != _completed_time:
+			_record_positions()
+	_sample_positions()
 	_refresh_view()
+
+
+## 场次由模拟实例标识，单位 ID 在同场不复用；记录结算后的完整位置。
+func _record_positions() -> void:
+	for unit: BattleSim.Unit in sim.units.values():
+		var track: MotionTrack = _local_tracks.get(unit.id)
+		if track == null:
+			track = MotionTrack.new(sim.get_instance_id(), 0, unit.id)
+			_local_tracks[unit.id] = track
+		track.record(sim.time, unit.pos, unit.motion_revision)
+	_completed_time = sim.time
+
+
+## 绑定已存在角色的同步源；重连必须提升代次，旧句柄不会再被画面读取。
+func open_remote_motion(scene_id: int, entity_id: int, generation: int, delay: float, gap: float) -> MotionTrack:
+	if sim == null or scene_id != sim.get_instance_id() or not sim.units.has(entity_id) or delay < 0.0 or gap <= delay or not is_finite(delay) or not is_finite(gap):
+		return null
+	var previous: MotionTrack = _remote_tracks.get(entity_id)
+	if previous != null and generation <= previous.generation:
+		return null
+	var track := MotionTrack.new(scene_id, generation, entity_id, delay, gap)
+	_remote_tracks[entity_id] = track
+	return track
+
+
+## 各单位每帧只取一次位置，远端时钟与本地模拟相互独立。
+func _sample_positions(wall: float = Time.get_ticks_usec() / 1000000.0) -> void:
+	for id: int in _local_tracks:
+		var remote: MotionTrack = _remote_tracks.get(id)
+		if remote != null:
+			# 重连第一包之前保持原画面，不能闪回本地模拟位置。
+			if not remote.samples.is_empty():
+				_display_positions[id] = remote.remote_position(wall)
+			elif not _display_positions.has(id):
+				_display_positions[id] = sim.units[id].pos
+		else:
+			_display_positions[id] = _local_tracks[id].local_position(_accumulator)
 
 
 ## 渲染战斗快照和技能反馈，隔离验证保留独立的最终画面。
 func _refresh_view(final_frame: bool = false) -> void:
+	if _stepping:
+		return
 	if _skill_validation_mode:
 		if not _skill_validation_view or _view == null or sim == null or controller == null or _leaving:
 			return
@@ -186,6 +238,21 @@ func _refresh_view(final_frame: bool = false) -> void:
 	if sim.formal_skill_sortie and not _skill_result_notice.is_empty():
 		text = _skill_result_notice
 	var frame := sim.snapshot()
+	# 初次入场和外部直接推进模拟时，建立可信位置基线。
+	if _completed_time != sim.time:
+		_local_tracks.clear()
+		_record_positions()
+		_sample_positions()
+	for unit: Dictionary in frame["units"]:
+		var id: int = unit["id"]
+		var track := _local_tracks[id]
+		var actor: BattleSim.Unit = sim.units[id]
+		# 两步之间也可能执行瞬移、暂停或重置；不能从旧位置再插回去。
+		if track.samples.back().revision != actor.motion_revision or track.samples.back().pos != actor.pos or ((sim.paused or sim.finished) and track.samples.size() > 1):
+			track.record(sim.time, actor.pos, actor.motion_revision)
+			if not _remote_tracks.has(id):
+				_display_positions[id] = actor.pos
+		unit["pos"] = _display_positions[id]
 	if sim.player_controls:
 		var actor := controller.selected_unit()
 		if actor != null and not actor.cast.is_empty() and _skill_result_notice == "技能已入队":
@@ -200,7 +267,8 @@ func _refresh_view(final_frame: bool = false) -> void:
 		var aim := controller.aim_view(_aim_key, _pointer, _pointer_is_ground()) if not _aim_key.is_empty() else {}
 		frame["player_hud"] = {"target": target.id if target != null else -1,
 			"heal_preview": sim.player_heal_preview(actor, target),
-			"prefs": controller.preferences, "settings": _settings_open, "aim": aim}
+			"prefs": controller.preferences, "settings": _settings_open, "aim": aim,
+			"display": _display_options.limits() if _settings_open and _display_options != null else {}}
 	_view.call("render", frame, controller.selected_slot, text, ProjectSettings.globalize_path(LOG_PATH))
 
 
@@ -433,6 +501,12 @@ func _player_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 	if _settings_open:
 		if not secondary and kind == "settings_close":
 			_settings_open = false
+		elif not secondary and kind == "display_preference" and _display_options != null:
+			if controller.set_preference(hit["key"], hit["value"]):
+				_display_options.apply_preferences(controller.preferences)
+			else:
+				_toast = "设置保存失败"
+				_toast_until_ms = Time.get_ticks_msec() + 1500
 		elif not secondary and kind == "preference":
 			if not controller.toggle_preference(hit["key"]):
 				_toast = "设置保存失败"

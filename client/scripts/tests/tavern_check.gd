@@ -8,12 +8,14 @@ const TavernEvents := preload("res://scripts/tavern/tavern_events.gd")
 const TavernLayout := preload("res://scripts/data/tavern_layout.gd")
 const TavernController := preload("res://scripts/input/tavern_controller.gd")
 
+const MotionTrack := preload("res://scenes/ui/motion_track.gd")
 const TICK := 0.05
 
 var _failures: int = 0
 var _layout: Dictionary = {}
 
 
+## 在同一入口检查酒馆规则与显示路径。
 func _initialize() -> void:
 	_layout = TavernLayout.load_layout()
 	var problems := TavernLayout.validate(_layout)
@@ -21,6 +23,7 @@ func _initialize() -> void:
 	if problems.is_empty():
 		_geometry()
 		_movement()
+		_display_corners()
 		_invalid_clicks()
 		_right_click_and_focus()
 		_interaction()
@@ -162,6 +165,38 @@ func _movement() -> void:
 	var self_click := controller.on_left_click(sim.captain_pos)
 	_check("点队长自己：不做任何事，不打断移动", self_click.get("ignored", false) and sim.is_moving() and sim.destination == dest_before, str(self_click))
 	_check("点队长自己不打开面板", sim.panel == "")
+
+
+## 对真实绕障路径逐帧取样，验证每个转弯都经过权威路点。
+func _display_corners() -> void:
+	for fps: int in [60, 120]:
+		var sim: TavernSim = _make()["sim"]
+		var track := MotionTrack.new(sim.get_instance_id(), sim.captain_generation, 0)
+		track.record(sim.time, sim.captain_pos, 0)
+		sim.click_ground(Vector2(700, 700))
+		var valid := true
+		var count := 0
+		var steps := 0
+		while sim.is_moving() and steps < 800:
+			steps += 1
+			var before := sim.captain_pos
+			var corners := PackedVector2Array()
+			sim.step(TICK, corners)
+			track.record(sim.time, sim.captain_pos, 0, corners)
+			var chain := PackedVector2Array([before])
+			chain.append_array(corners)
+			chain.append(sim.captain_pos)
+			var length := 0.0
+			for i in range(1, chain.size()):
+				length += chain[i - 1].distance_to(chain[i])
+			if not corners.is_empty():
+				count += 1
+				var phase := TICK * before.distance_to(corners[0]) / length
+				valid = valid and track.local_position(phase).distance_to(corners[0]) < 0.001
+			for frame in range(1, roundi(TICK * fps) + 1):
+				var pos := track.local_position(float(frame) / fps)
+				valid = valid and sim.nav.on_path_ok(pos) and pos.distance_to(before) <= length + 0.001
+		_check("%d FPS 酒馆逐帧绕障并精确通过转角" % fps, valid and count > 0 and track.local_position(TICK).distance_to(Vector2(700, 700)) < 0.001)
 
 
 func _invalid_clicks() -> void:

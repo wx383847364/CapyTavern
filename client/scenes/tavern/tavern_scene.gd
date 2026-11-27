@@ -3,6 +3,7 @@ extends Node2D
 ## 移动、交互、面板规则都在 TavernSim；这里不判断可不可走，也不读任何动画回调。
 ## 队长来自存档（P2 的单档服务）：存档里有队长才生成角色，位置不进存档，重启回默认落点。
 
+const MotionTrack := preload("res://scenes/ui/motion_track.gd")
 const TavernSim := preload("res://scripts/tavern/tavern_sim.gd")
 const TavernEvents := preload("res://scripts/tavern/tavern_events.gd")
 const TavernLayout := preload("res://scripts/data/tavern_layout.gd")
@@ -31,6 +32,9 @@ var table: ItemsTable
 var roster: TavernRoster
 var ui: TavernUi
 var _accumulator: float = 0.0
+var _motion: MotionTrack
+var _display_pos := Vector2.ZERO
+var _stepping := false
 var _toast: String = ""
 var _toast_until_ms: int = 0
 var _class_colors: Dictionary = {}
@@ -317,6 +321,7 @@ func _geometry_problems(layout: Dictionary) -> PackedStringArray:
 	return out
 
 
+## 每步只发布完成后的移动轨迹，每帧计算一次队长的显示位置。
 func _process(delta: float) -> void:
 	if sim == null:
 		return
@@ -324,7 +329,14 @@ func _process(delta: float) -> void:
 	_accumulator = minf(_accumulator + delta, TICK * 5.0)
 	while _accumulator >= TICK:
 		_accumulator -= TICK
-		sim.step(TICK)
+		var corners := PackedVector2Array()
+		_stepping = true
+		sim.step(TICK, corners)
+		_stepping = false
+		if sim.has_captain and _motion != null and _motion.generation == sim.captain_generation:
+			_motion.record(sim.time, sim.captain_pos, 0, corners)
+	if _motion != null:
+		_display_pos = _motion.local_position(_accumulator)
 	_refresh_view()
 
 
@@ -361,9 +373,9 @@ func _event_pos(event: InputEvent) -> Vector2:
 	return Vector2(-1.0, -1.0)
 
 
-## 界面先消费点击；场景把可见的队长本体命中交给控制器，与脚下命中一并判断。
+## 界面先消费点击；控制器使用这一帧队长的本体和脚下命中。
 func _on_left_click(pos: Vector2) -> void:
-	_show_result(controller.on_left_click(pos, bool(_view.call("captain_body_at", pos))))
+	_show_result(controller.on_left_click(pos, bool(_view.call("captain_at", pos))))
 
 
 ## 记录面板请求和实际响应，正式阵容提示使用当前专精。
@@ -401,10 +413,21 @@ func _show_result(result: Dictionary) -> void:
 	_refresh_view()
 
 
+## 输入和面板刷新复用这一帧的位置；新队长在自己的出生点建立基线。
 func _refresh_view() -> void:
+	if _stepping:
+		return
 	if Time.get_ticks_msec() > _toast_until_ms:
 		_toast = ""
 	var snapshot := sim.snapshot()
+	if sim.has_captain:
+		if _motion == null or _motion.generation != sim.captain_generation:
+			_motion = MotionTrack.new(sim.get_instance_id(), sim.captain_generation, 0)
+			_motion.record(sim.time, sim.captain_pos, 0)
+			_display_pos = sim.captain_pos
+		snapshot["pos"] = _display_pos
+	else:
+		_motion = null
 	_view.call("render", snapshot, _toast, service.members().size() if service != null else 0)
 	if ui != null:
 		ui.sync(String(snapshot.get("panel", "")))

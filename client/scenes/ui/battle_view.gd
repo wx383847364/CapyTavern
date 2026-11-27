@@ -18,8 +18,9 @@ const TARGET_OF_TARGET_BAR := Rect2(1205, 122, 284, 51)
 const OUTPUT_PANEL := Rect2(1503, 111, 194, 178)
 const THREAT_PANEL := Rect2(1707, 111, 197, 178)
 const SETTINGS_BUTTON := Rect2(24, 111, 108, 40)
-const SETTINGS_PANEL := Rect2(658, 331, 604, 382)
-const SETTINGS_CLOSE := Rect2(1101, 644, 125, 40)
+const SETTINGS_PANEL := Rect2(658, 331, 604, 533)
+const SETTINGS_CLOSE := Rect2(1101, 799, 125, 40)
+const DisplayPreferences := preload("res://scripts/input/battle_controller.gd")
 const SETTINGS_OPTIONS := ["names", "release_cast", "tab_health"]
 const HIT_FLASH_MS := 100
 const CRITICAL_RING_MS := 150
@@ -87,7 +88,7 @@ func render(snapshot: Dictionary, selected_slot: int, toast: String, _log_path: 
 			_controlled = unit
 		if unit["alive"]:
 			_live_units.append(unit)
-	# 圆形及菱形所在的模拟位置作为灰盒接地点，同 Y 按单位 ID 固定前后。
+	# 圆形及菱形使用同一帧的显示位置作为接地点，同 Y 按单位 ID 固定前后。
 	_live_units.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		var ay: float = a["pos"].y
 		var by: float = b["pos"].y
@@ -186,6 +187,14 @@ func hit_test(pos: Vector2) -> Dictionary:
 		for index in SETTINGS_OPTIONS.size():
 			if _option_rect(index).has_point(pos):
 				return {"kind": "preference", "key": SETTINGS_OPTIONS[index]}
+		for row in 2:
+			var key := "fps" if row == 0 else "resolution"
+			var choices := DisplayPreferences.FPS_CHOICES if row == 0 else DisplayPreferences.RESOLUTION_CHOICES
+			for index in choices.size():
+				if _display_option_rect(row, index).has_point(pos):
+					var value: int = choices[index]
+					if value == 0 or value <= int(_hud.get("display", {}).get(key, 0)):
+						return {"kind": "display_preference", "key": key, "value": value}
 		return {"kind": "settings_close"} if SETTINGS_CLOSE.has_point(pos) else {"kind": "hud"}
 	for slot_index in 4:
 		if _portrait_rect(slot_index).has_point(pos):
@@ -821,6 +830,34 @@ func _option_rect(index: int) -> Rect2:
 	return Rect2(692, 404 + 69 * index, 532, 50)
 
 
+## 两组显示档位使用同一行几何，保证不可用档位也能正确拦截点击。
+func _display_option_rect(row: int, index: int) -> Rect2:
+	if index == 0:
+		return Rect2(692, 625 + 82 * row, 106, 34)
+	return Rect2(804 + 71 * (index - 1), 625 + 82 * row, 65, 34)
+
+
+## 标记玩家选择并灰显超过当前上限的档位，生效回退时标记跟随系统。
+func _draw_display_options(prefs: Dictionary) -> void:
+	var limits: Dictionary = _hud.get("display", {})
+	for row in 2:
+		var key := "fps" if row == 0 else "resolution"
+		var choices := DisplayPreferences.FPS_CHOICES if row == 0 else DisplayPreferences.RESOLUTION_CHOICES
+		var limit := int(limits.get(key, 0))
+		var selected := int(prefs.get(key, 0))
+		var header := "画面帧率上限" if row == 0 else "显示分辨率"
+		_text(Vector2(694, 617 + 82 * row), header, 19, Color("adc1df"))
+		for index in choices.size():
+			var value: int = choices[index]
+			var rect := _display_option_rect(row, index)
+			var available := value == 0 or value <= limit
+			var active := available and (value == selected or value == 0 and selected > limit)
+			var label := "跟随系统" if value == 0 else ("%d Hz" % value if row == 0 else ("%dp" % value if value < 2160 else "4K"))
+			draw_rect(rect, Color("254267") if active else Color("101925"))
+			draw_rect(rect, Color("668dba") if active else Color("39485d"), false, 1.0)
+			_text(rect.position + Vector2(0, 23), label, 16, Color("eef3ff") if available else Color("65738a"), rect.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+
+
 ## 暂停设置保留清晰的模态边界，关闭操作与鼠标选项均由场景消费。
 func _draw_settings() -> void:
 	draw_rect(Rect2(0, 0, 1920, 1080), Color(0, 0, 0, 0.60))
@@ -834,9 +871,10 @@ func _draw_settings() -> void:
 		var row := _option_rect(index)
 		_draw_panel(row)
 		_text(row.position + Vector2(15, 33), items[index], 21, Color("eef3ff"))
+	_draw_display_options(prefs)
 	_draw_panel(SETTINGS_CLOSE)
 	_text(SETTINGS_CLOSE.position + Vector2(27, 27), "关闭", 18, Color("eef3ff"))
-	_text(Vector2(693, 671), _toast if not _toast.is_empty() else "关闭后按 P 继续", 18, Color("adc1df"))
+	_text(Vector2(693, 826), _toast if not _toast.is_empty() else "关闭后按 P 继续", 18, Color("adc1df"))
 
 
 ## 保留原结果矩形和样式；隔离画面只说明验证结束，不宣称奖励、存档或正式出征。

@@ -25,6 +25,7 @@ class Unit:
 	var max_hp: float = 1.0
 	var hp: float = 1.0
 	var pos: Vector2 = Vector2.ZERO
+	var motion_revision := 0
 	var speed: float = 100.0
 	var alive: bool = true
 	# 普攻（友方 damage / heal；敌方近战）
@@ -1170,6 +1171,8 @@ func _apply_effect(caster: Unit, target: Unit, skill_id: String, effect: Diction
 					_apply_status(enemy, "frozen", caster.id, float(effect["duration"]), {"started_at": time})
 		"blink":
 			caster.pos = aim["point"]
+			# 位移是真实断点，后续每个位置都携带新的段号。
+			caster.motion_revision += 1
 		"ice_block":
 			var base: Dictionary = config["classes"][caster.kind]
 			var duration := float(effect["duration"])

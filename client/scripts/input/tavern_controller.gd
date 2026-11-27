@@ -14,10 +14,11 @@ func setup(tavern_sim: TavernSim) -> void:
 
 
 ## 左键先尊重面板限制；命中队长可见本体或脚下范围时忽略，随后判断对象和地面。
-func on_left_click(pos: Vector2, captain_body_hit: bool = false) -> Dictionary:
+func on_left_click(pos: Vector2, visible_captain_hit: Variant = null) -> Dictionary:
 	if sim.panel != "":
 		return sim.click_ground(pos)
-	if captain_body_hit or sim.captain_at(pos):
+	var captain_hit := sim.captain_at(pos) if visible_captain_hit == null else bool(visible_captain_hit)
+	if captain_hit:
 		return {"ok": true, "reason": "", "ignored": true}
 	var object_id := sim.object_at(pos)
 	if object_id != "":
