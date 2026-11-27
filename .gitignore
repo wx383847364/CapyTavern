@@ -13,7 +13,8 @@ Logs/
 
 # 导出物
 export/
-build/
+/build/*
+!/build/debug/
 
 # macOS
 .DS_Store

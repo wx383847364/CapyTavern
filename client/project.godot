@@ -23,6 +23,10 @@ window/size/window_width_override=1280
 window/size/window_height_override=720
 window/stretch/mode="canvas_items"
 
+[gui]
+
+theme/custom_font.web="res://data/fonts/NotoSansSC-Regular.otf"
+
 [input]
 
 click_primary={

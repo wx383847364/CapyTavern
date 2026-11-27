@@ -30,9 +30,10 @@
 | `doc/**`（任务单、进度、契约、裁决） | 酒馆制作人 |
 | `tools/doc_maintenance/**`、`tools/repo_maintenance/**`、`.githooks/**` | 酒馆制作人 |
 | `tools/project_dashboard/**`（本机进度控制台代码；登记表在 `doc/方案与数据/控制台登记.json`，归制作人） | 酒馆程序 |
+| `tools/client/**`（客户端构建工具） | 酒馆程序 |
 | `locks.md`、`dispatch.md` | 酒馆大肥鱼 |
 
-`tools/**` 不整树交给某一岗。文档维护、仓库 hook 归制作人；进度控制台代码 2026-11-06 起归程序，它读的登记表仍归制作人。以后客户端构建或资源管线另开 `tools/client/**`，归酒馆程序，先改本表再使用。
+`tools/**` 不整树交给某一岗。文档维护、仓库 hook 归制作人；进度控制台代码 2026-11-06 起归程序，它读的登记表仍归制作人。客户端构建工具放在 `tools/client/**`，由酒馆程序维护。
 `export/**` 的写者是酒馆表现；产物留在本地，由 `.gitignore` 排除，不进提交。
 禁碰：生成物、构建配置、`.godot/`、`Library/`、`obj/`、`*.import` 自动生成段。
 `locks.md`、`dispatch.md` 是运行态，不进 git，须写进 `.gitignore`。

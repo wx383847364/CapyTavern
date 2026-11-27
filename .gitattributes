@@ -1,0 +1,1 @@
+build/debug/CapyTavern.app/Contents/MacOS/CapyTavern filter=lfs diff=lfs merge=lfs -text

@@ -12,8 +12,14 @@ while IFS= read -r path; do
       echo "[pre-commit] 不允许提交运行态台账：${path}" >&2
       BLOCKED=1
       ;;
-    .godot/*|Library/*|Temp/*|obj/*|Logs/*|export/*|build/*|*.csproj|*.sln|.DS_Store|*/.DS_Store)
+    .godot/*|Library/*|Temp/*|obj/*|Logs/*|export/*|*.csproj|*.sln|.DS_Store|*/.DS_Store)
       echo "[pre-commit] 不允许提交生成物或导出物：${path}" >&2
+      BLOCKED=1
+      ;;
+    build/debug/*)
+      ;;
+    build/*)
+      echo "[pre-commit] 只允许提交 build/debug 下的构建产物：${path}" >&2
       BLOCKED=1
       ;;
   esac
