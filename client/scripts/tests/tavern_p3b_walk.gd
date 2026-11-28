@@ -12,7 +12,10 @@ var _opened: Array[String] = []
 const SortieSession := preload("res://scripts/tavern/sortie_session.gd")
 
 
+## 验收只走脚本注入，避免桌面操作或焦点变化打断录制中的路径。
 func _initialize() -> void:
+	root.mouse_passthrough = true
+	root.unfocusable = true
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--out="):
 			_dir = arg.get_slice("=", 1)
@@ -53,25 +56,22 @@ func _file_text() -> String:
 	return FileAccess.get_file_as_string(_save) if FileAccess.file_exists(_save) else ""
 
 
-func _mouse(button: int, canvas_pos: Vector2) -> void:
-	var pos := canvas_pos / 1.5
+## 将已经处于视口中的控件或场景坐标交给原输入分发，覆盖当前窗口缩放。
+func _mouse(button: int, pos: Vector2) -> void:
 	var motion := InputEventMouseMotion.new()
 	motion.position = pos
 	motion.global_position = pos
-	Input.parse_input_event(motion)
+	root.push_input(motion, true)
+	for down: bool in [true, false]:
+		var event := InputEventMouseButton.new()
+		event.button_index = button
+		event.position = pos
+		event.global_position = pos
+		event.pressed = down
+		if down:
+			event.button_mask = MOUSE_BUTTON_MASK_LEFT if button == MOUSE_BUTTON_LEFT else MOUSE_BUTTON_MASK_RIGHT
+		root.push_input(event, true)
 	await process_frame
-	var event := InputEventMouseButton.new()
-	event.button_index = button
-	event.position = pos
-	event.global_position = pos
-	event.pressed = true
-	Input.parse_input_event(event)
-	await process_frame
-	event.pressed = false
-	Input.parse_input_event(event)
-	await process_frame
-	await process_frame
-
 
 func _node(node_name: String) -> Control:
 	return root.find_child(node_name, true, false) as Control
@@ -120,6 +120,7 @@ func _wait_idle() -> void:
 	await process_frame
 
 
+## 以当前布局的点击区验证走近交互，并保留空档招募、整备、保存和重试走查。
 func _run() -> void:
 	var sim = _scene.sim
 	var service = _scene.service
@@ -201,14 +202,16 @@ func _run() -> void:
 	await _wait_idle()
 	print("  起点 ", sim.captain_pos, " panel=", sim.panel)
 	_opened.clear()
-	await _mouse(MOUSE_BUTTON_LEFT, Vector2(280, 180))
+	var recruit: Rect2 = sim.object_info("recruit")["rect"]
+	await _mouse(MOUSE_BUTTON_LEFT, recruit.get_center())
 	await create_timer(0.4).timeout
 	_check("正在走向招募公告板", sim.is_moving() and sim.pending_object == "recruit", str(sim.pending_object))
-	await _mouse(MOUSE_BUTTON_LEFT, Vector2(1400, 330))
+	var prepare: Rect2 = sim.object_info("prepare")["rect"]
+	await _mouse(MOUSE_BUTTON_LEFT, prepare.get_center())
 	await _wait_idle()
 	await create_timer(0.3).timeout
 	print("  终点 ", sim.captain_pos, " panel=", sim.panel, " pending=", sim.pending_object)
-	_check("改点整备桌：到达后开整备面板，招募面板没有随后弹出", sim.panel == "prepare" and not _opened.has("recruit") and _opened.count("prepare") == 1, str(_opened))
+	_check("改点左侧货台：到达后开整备面板，招募面板没有随后弹出", sim.panel == "prepare" and not _opened.has("recruit") and _opened.count("prepare") == 1, str(_opened))
 	await _click("panel_close")
 
 	print("── 示例四：切换队长 ──")
@@ -302,5 +305,9 @@ func _run() -> void:
 	await process_frame
 	_check("按 F1 不再招募", service.members().size() == members_now)
 
+	# 在脚本和窗口销毁前释放测试回调及场景，避免引擎退出阶段回收仍绑定的 GDScript 对象。
+	SortieSession.goto_scene = Callable()
+	_scene.queue_free()
+	await process_frame
 	print("RESULT: %s (%d 条失败)" % ["FAIL" if _failures > 0 else "ALL PASS", _failures])
 	quit(1 if _failures > 0 else 0)

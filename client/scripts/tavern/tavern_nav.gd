@@ -7,6 +7,7 @@ const TavernLayout := preload("res://scripts/data/tavern_layout.gd")
 
 var _bounds: Rect2 = Rect2()
 var _inflated: Array[Rect2] = []   # 障碍外扩队长半径
+var _polygons: Array[Dictionary] = []
 var _radius: float = 22.0
 var _cell: float = 10.0
 var _grid: AStarGrid2D = AStarGrid2D.new()
@@ -16,17 +17,27 @@ var _rows: int = 0
 var _margin: float = 0.0
 
 
-## 障碍 = 布局里的 obstacles + 全部交互点的本体。
+## 用矩形和多边形接地占地建立寻路网格，交互热区只负责点击。
 func setup(layout: Dictionary) -> void:
 	_bounds = TavernLayout.rect_of(layout["bounds"])
 	_radius = float(layout["captain"]["radius"])
 	_cell = float(layout["cell"])
 	_margin = _cell * 0.5 * sqrt(2.0) + 0.1
 	_inflated.clear()
+	_polygons.clear()
 	for entry: Dictionary in layout["obstacles"]:
-		_inflated.append(TavernLayout.rect_of(entry).grow(_radius))
-	for entry: Dictionary in layout["objects"]:
-		_inflated.append(TavernLayout.rect_of(entry).grow(_radius))
+		if entry.has("polygon"):
+			var points := TavernLayout.polygon_of(entry)
+			var bounds := Rect2(points[0], Vector2.ZERO)
+			for point in points:
+				bounds = bounds.expand(point)
+			_polygons.append({"points": points, "bounds": bounds})
+		elif entry.has("footprint"):
+			var rect := TavernLayout.rect_of(entry["footprint"])
+			rect.position += TavernLayout.point_of(entry)
+			_inflated.append(rect.grow(_radius))
+		else:
+			_inflated.append(TavernLayout.rect_of(entry).grow(_radius))
 	_cols = int(ceil(_bounds.size.x / _cell))
 	_rows = int(ceil(_bounds.size.y / _cell))
 	_grid = AStarGrid2D.new()
@@ -38,7 +49,8 @@ func setup(layout: Dictionary) -> void:
 	_grid.update()
 	for column in _cols:
 		for row in _rows:
-			if not _point_open(_cell_center(Vector2i(column, row)), 0.0):
+			# 多边形斜边会掠过栅格角，取样时多留半格对角线。
+			if not _point_open(_cell_center(Vector2i(column, row)), 0.0, _margin):
 				_grid.set_point_solid(Vector2i(column, row), true)
 
 
@@ -57,12 +69,7 @@ func walkable(point: Vector2) -> bool:
 
 ## 沿预先算好的路径走时的位置检查：贴着外扩障碍边的合法站位允许 1 像素容差。
 func on_path_ok(point: Vector2) -> bool:
-	if not _bounds.grow(-(_radius - 1.0)).has_point(point):
-		return false
-	for rect in _inflated:
-		if rect.grow(-1.0).has_point(point):
-			return false
-	return true
+	return _point_open(point, -1.0)
 
 
 ## 点击落点是否可站：比 walkable 多留一点余量，保证它所在的栅格中心也可站。
@@ -75,6 +82,8 @@ func click_ok(point: Vector2) -> bool:
 func find_path(from: Vector2, to: Vector2) -> Dictionary:
 	if not click_ok(to):
 		return {"ok": false, "reason": "blocked"}
+	if _segment_open(from, to, -0.5):
+		return {"ok": true, "path": [from, to]}
 	var start_cell := _nearest_open_cell(from)
 	var goal_cell := _nearest_open_cell(to)
 	if start_cell.x < 0 or goal_cell.x < 0:
@@ -83,20 +92,42 @@ func find_path(from: Vector2, to: Vector2) -> Dictionary:
 	if cells.is_empty():
 		return {"ok": false, "reason": "unreachable"}
 	var raw: Array[Vector2] = [from]
-	for index in range(1, cells.size() - 1):
-		raw.append(_cell_center(cells[index]))
+	# 真实起终点靠近斜边时，保留首尾格中心作为可选的接入路点。
+	for cell in cells:
+		raw.append(_cell_center(cell))
 	raw.append(to)
-	return {"ok": true, "path": _smooth(raw)}
+	var route := _smooth(raw)
+	if route.is_empty():
+		return {"ok": false, "reason": "unreachable"}
+	return {"ok": true, "path": route}
 
 
 ## 线段是否完全落在可走区域里（不穿任何外扩障碍，也不出界）。
 func segment_clear(a: Vector2, b: Vector2) -> bool:
-	var shrunk := _bounds.grow(-_radius)
+	return _segment_open(a, b, 0.0)
+
+
+## 检查整条线段与占地的距离，拉直路径时可为贴边的合法起点留少量容差。
+func _segment_open(a: Vector2, b: Vector2, margin: float) -> bool:
+	var clearance := _radius + margin
+	var shrunk := _bounds.grow(-clearance)
 	if not shrunk.has_point(a) or not shrunk.has_point(b):
 		return false
 	for rect in _inflated:
-		if _segment_hits(a, b, rect):
+		if _segment_hits(a, b, rect.grow(margin)):
 			return false
+	for polygon in _polygons:
+		var bounds: Rect2 = polygon["bounds"]
+		if not _segment_hits(a, b, bounds.grow(clearance)):
+			continue
+		var points: PackedVector2Array = polygon["points"]
+		if Geometry2D.is_point_in_polygon(a, points) or Geometry2D.is_point_in_polygon(b, points):
+			return false
+		for index in points.size():
+			var nearest := Geometry2D.get_closest_points_between_segments(
+				a, b, points[index], points[(index + 1) % points.size()])
+			if nearest[0].distance_squared_to(nearest[1]) <= clearance * clearance:
+				return false
 	return true
 
 
@@ -109,19 +140,32 @@ func _cell_of(point: Vector2) -> Vector2i:
 	return Vector2i(clampi(int(floor(local.x / _cell)), 0, _cols - 1), clampi(int(floor(local.y / _cell)), 0, _rows - 1))
 
 
-func _point_open(point: Vector2, margin: float) -> bool:
+## 按角色脚点到占地的距离判断站位，栅格取样可以给多边形单独留余量。
+func _point_open(point: Vector2, margin: float, polygon_margin: float = 0.0) -> bool:
 	if not _bounds.grow(-(_radius + margin)).has_point(point):
 		return false
 	for rect in _inflated:
 		if rect.grow(margin).has_point(point):
 			return false
+	var clearance := _radius + margin + polygon_margin
+	for polygon in _polygons:
+		var bounds: Rect2 = polygon["bounds"]
+		if not bounds.grow(clearance).has_point(point):
+			continue
+		var points: PackedVector2Array = polygon["points"]
+		if Geometry2D.is_point_in_polygon(point, points):
+			return false
+		for index in points.size():
+			var nearest := Geometry2D.get_closest_point_to_segment(point, points[index], points[(index + 1) % points.size()])
+			if nearest.distance_squared_to(point) <= clearance * clearance:
+				return false
 	return true
 
 
-## 起点可能因为栅格取样落在「实心」格子里（贴着障碍边站着）：找最近的开放格。
+## 贴边站位可能落在实心格里，找能从该点直接走到的开放格。
 func _nearest_open_cell(point: Vector2) -> Vector2i:
 	var home := _cell_of(point)
-	if not _grid.is_point_solid(home):
+	if not _grid.is_point_solid(home) and _segment_open(point, _cell_center(home), -0.5):
 		return home
 	for ring in range(1, 4):
 		for dx in range(-ring, ring + 1):
@@ -129,32 +173,27 @@ func _nearest_open_cell(point: Vector2) -> Vector2i:
 				if maxi(absi(dx), absi(dy)) != ring:
 					continue
 				var candidate := home + Vector2i(dx, dy)
-				if _grid.is_in_boundsv(candidate) and not _grid.is_point_solid(candidate):
+				if (_grid.is_in_boundsv(candidate) and not _grid.is_point_solid(candidate)
+						and _segment_open(point, _cell_center(candidate), -0.5)):
 					return candidate
 	return Vector2i(-1, -1)
 
 
-## 能直走就跳过中间点。
+## 能直走就跳过中间点；凑不出可走的下一段时拒绝整条路线。
 func _smooth(raw: Array[Vector2]) -> Array[Vector2]:
 	var out: Array[Vector2] = [raw[0]]
 	var anchor := 0
 	while anchor < raw.size() - 1:
-		var farthest := anchor + 1
+		var farthest := -1
 		for candidate in range(raw.size() - 1, anchor, -1):
-			if _line_ok(raw[anchor], raw[candidate]):
+			if _segment_open(raw[anchor], raw[candidate], -0.5):
 				farthest = candidate
 				break
+		if farthest < 0:
+			return []
 		out.append(raw[farthest])
 		anchor = farthest
 	return out
-
-
-## 拉直时的直线检查：起点可能贴着障碍边（站位合法但在外扩边上），所以只检查线段是否穿过障碍内部。
-func _line_ok(a: Vector2, b: Vector2) -> bool:
-	for rect in _inflated:
-		if _segment_hits(a, b, rect.grow(-0.5)):
-			return false
-	return _bounds.grow(-_radius + 0.5).has_point(b) and _bounds.grow(-_radius + 0.5).has_point(a)
 
 
 ## 线段与矩形（含边界）是否相交：slab 法。

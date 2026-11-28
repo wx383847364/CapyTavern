@@ -26,14 +26,34 @@ static func point_of(entry: Dictionary) -> Vector2:
 	return Vector2(float(entry["x"]), float(entry["y"]))
 
 
+## 把贴图局部的占地点换算成场景坐标，物件移位时占地跟随贴图。
+static func polygon_of(entry: Dictionary) -> PackedVector2Array:
+	var origin := point_of(entry)
+	var points := PackedVector2Array()
+	for pair: Array in entry["polygon"]:
+		points.append(origin + Vector2(float(pair[0]), float(pair[1])))
+	return points
+
+
 ## 返回问题列表，空表示可用。几何上的检查（落点是否可走）在 TavernNav 建好以后由调用方补。
 static func validate(layout: Dictionary) -> PackedStringArray:
 	var problems := PackedStringArray()
-	for key in ["bounds", "cell", "captain", "spawn", "default_pos", "arrive_eps", "obstacles", "objects"]:
+	for key in ["bounds", "cell", "captain", "spawn", "default_pos", "arrive_eps", "layers", "obstacles", "objects"]:
 		if not layout.has(key):
 			problems.append("缺字段 %s" % key)
 	if not problems.is_empty():
 		return problems
+	for entry: Dictionary in layout["obstacles"]:
+		if not entry.has("polygon"):
+			continue
+		var polygon: Variant = entry["polygon"]
+		if not polygon is Array or polygon.size() < 3:
+			problems.append("物件 %s 的占地多边形至少需要三个点" % entry.get("id", "?"))
+			continue
+		for pair: Variant in polygon:
+			if not pair is Array or pair.size() != 2:
+				problems.append("物件 %s 的占地点需要 [x, y]" % entry.get("id", "?"))
+				break
 	var kinds_seen := {}
 	for entry: Dictionary in layout["objects"]:
 		var kind := String(entry.get("kind", ""))

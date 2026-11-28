@@ -92,6 +92,7 @@ func _object_center(sim: TavernSim, object_id: String) -> Vector2:
 
 # ── 布局几何 ──
 
+## 验证正式大厅的矩形边界、摆件独立占地和三个交互落点。
 func _geometry() -> void:
 	var battle := _make()
 	var sim: TavernSim = battle["sim"]
@@ -109,17 +110,38 @@ func _geometry() -> void:
 		kinds[sim.object_info(object_id)["kind"]] = true
 	_check("交互点正好是招募、整备、出征", kinds.keys().size() == 3 and kinds.has("recruit") and kinds.has("prepare") and kinds.has("sortie"))
 
+	_check("大厅行走边界是原尺寸地板矩形", sim.nav.bounds() == Rect2(0, 433, 1920, 637))
+	_check("货台只阻挡接地面，箱子背后的地面可站", not sim.nav.walkable(Vector2(350, 730)) and sim.nav.click_ok(Vector2(300, 650)))
+	_check("告示牌只阻挡支脚占地，牌面投影后方可站", not sim.nav.walkable(Vector2(1722, 570)) and sim.nav.click_ok(Vector2(1722, 493)))
+	_check("货台斜边外包框里的空地可走", sim.nav.click_ok(Vector2(385, 900)))
+	_check("原灰盒桌子和隔断位置已恢复通行", sim.nav.segment_clear(Vector2(400, 585), Vector2(1120, 585)))
+	# 从配置中分别移走一个摆件，另一个仍保持原位置的阻挡。
+	for removed: int in [0, 1]:
+		var layout := _layout.duplicate(true)
+		layout["obstacles"].remove_at(removed)
+		var nav := (_make(layout)["sim"] as TavernSim).nav
+		var probes := [Vector2(350, 730), Vector2(1722, 570)]
+		_check("移走 %s 后只释放自己的占地" % _layout["obstacles"][removed]["id"],
+			nav.click_ok(probes[removed]) and not nav.walkable(probes[1 - removed]))
+
 
 # ── 移动 ──
 
+## 拖出两条被物件占地截断的路线，并检查固定步长、到点与改道信号。
 func _movement() -> void:
 	var battle := _make()
 	var sim: TavernSim = battle["sim"]
 	var events: TavernEvents = battle["events"]
 	var controller: TavernController = battle["controller"]
-	var target := Vector2(700, 700)
+	var board_start := Vector2(1510, 565)
+	var board_end := Vector2(1870, 565)
+	var board_route := sim.nav.find_path(board_start, board_end)
+	_check("路径从告示牌一侧绕到另一侧", not sim.nav.segment_clear(board_start, board_end)
+		and board_route["ok"] and board_route["path"].size() > 2, str(board_route))
+	sim.spawn_captain("warrior", Vector2(300, 650))
+	var target := Vector2(80, 1010)
 	var straight_blocked := not sim.nav.segment_clear(sim.captain_pos, target)
-	_check("测试前提：默认落点到目标之间隔着隔断，直线不通", straight_blocked)
+	_check("货台接地多边形截断直线路径", straight_blocked)
 	var result := controller.on_left_click(target)
 	_check("点可达地面：接受，路径有绕行点", result["ok"] and int(result["waypoints"]) >= 3, str(result))
 	var last := sim.captain_pos
@@ -153,13 +175,13 @@ func _movement() -> void:
 	_check("站住后不再发移动信号", _count(events, "tavern_captain_moved") == before)
 	# 移动中改点另一处：只保留最新落点
 	var second := Vector2(1400, 900)
-	controller.on_left_click(Vector2(300, 400))
+	controller.on_left_click(Vector2(480, 500))
 	_steps(sim, 5)
 	controller.on_left_click(second)
 	_settle(sim)
 	_check("移动中点另一处：改走新路径，只去最新落点", sim.captain_pos.distance_to(second) < 0.01, str(sim.captain_pos))
 	# 点队长自己
-	controller.on_left_click(Vector2(300, 400))
+	controller.on_left_click(Vector2(480, 500))
 	_steps(sim, 3)
 	var dest_before := sim.destination
 	var self_click := controller.on_left_click(sim.captain_pos)
@@ -171,9 +193,11 @@ func _movement() -> void:
 func _display_corners() -> void:
 	for fps: int in [60, 120]:
 		var sim: TavernSim = _make()["sim"]
+		sim.spawn_captain("warrior", Vector2(300, 650))
+		var target := Vector2(80, 1010)
 		var track := MotionTrack.new(sim.get_instance_id(), sim.captain_generation, 0)
 		track.record(sim.time, sim.captain_pos, 0)
-		sim.click_ground(Vector2(700, 700))
+		sim.click_ground(target)
 		var valid := true
 		var count := 0
 		var steps := 0
@@ -196,31 +220,32 @@ func _display_corners() -> void:
 			for frame in range(1, roundi(TICK * fps) + 1):
 				var pos := track.local_position(float(frame) / fps)
 				valid = valid and sim.nav.on_path_ok(pos) and pos.distance_to(before) <= length + 0.001
-		_check("%d FPS 酒馆逐帧绕障并精确通过转角" % fps, valid and count > 0 and track.local_position(TICK).distance_to(Vector2(700, 700)) < 0.001)
+		_check("%d FPS 酒馆逐帧绕障并精确通过转角" % fps, valid and count > 0 and track.local_position(TICK).distance_to(target) < 0.001)
 
 
+## 用一条测试墙制造不连通区域，正式场景的占地拒绝仍用两件实物验证。
 func _invalid_clicks() -> void:
-	var battle := _make()
+	var battle := _make(_divided_layout())
 	var sim: TavernSim = battle["sim"]
 	var events: TavernEvents = battle["events"]
 	var controller: TavernController = battle["controller"]
 	var good := Vector2(700, 700)
 	controller.on_left_click(good)
 	_steps(sim, 4)
-	var table_click := controller.on_left_click(Vector2(520, 585))
-	_check("点桌子（阻挡区域）：拒绝，原因 blocked", not table_click["ok"] and table_click["reason"] == "blocked", str(table_click))
+	var cargo_click := controller.on_left_click(Vector2(350, 730))
+	_check("点货台占地：拒绝，原因 blocked", not cargo_click["ok"] and cargo_click["reason"] == "blocked", str(cargo_click))
 	_check("无效点击不覆盖原合法命令", sim.is_moving() and sim.destination == good)
 	var outside := controller.on_left_click(Vector2(10, 10))
 	_check("点场景外：同样 blocked，原命令保留", not outside["ok"] and sim.destination == good)
-	var closet := controller.on_left_click(Vector2(1700, 880))
-	_check("点能站但不连通的区域（密闭储藏间）：unreachable，原命令保留", not closet["ok"] and closet["reason"] == "unreachable" and sim.destination == good, str(closet))
-	var wall := controller.on_left_click(Vector2(1575, 850))
-	_check("点墙：blocked", not wall["ok"] and wall["reason"] == "blocked")
+	var across := controller.on_left_click(Vector2(1700, 880))
+	_check("点能站但不连通的区域：unreachable，原命令保留", not across["ok"] and across["reason"] == "unreachable" and sim.destination == good, str(across))
+	var board_click := controller.on_left_click(Vector2(1722, 570))
+	_check("点告示牌底座：blocked", not board_click["ok"] and board_click["reason"] == "blocked")
 	_settle(sim)
 	_check("被拒绝之后原合法命令照常走完", sim.captain_pos.distance_to(good) < 0.01)
-	_check("三次拒绝都进日志", _count(events, "command_rejected", {"kind": "move"}) == 4, str(_count(events, "command_rejected")))
+	_check("四次拒绝都进日志", _count(events, "command_rejected", {"kind": "move"}) == 4, str(_count(events, "command_rejected")))
 	# 靠近阻挡边缘一点点的落点也不会让人穿墙：能走到的点都不在外扩障碍里
-	var near_wall := Vector2(1100, 138 + 22 + 3)
+	var near_wall := Vector2(1100, sim.nav.bounds().position.y + sim.nav.radius() + 3)
 	var near_result := controller.on_left_click(near_wall)
 	_check("贴边落点要么拒绝要么站得住，不会卡进墙里", (not near_result["ok"]) or sim.nav.on_path_ok(near_wall))
 
@@ -254,6 +279,7 @@ func _right_click_and_focus() -> void:
 
 # ── 交互点 ──
 
+## 检查三个场景入口的走近规则，普通走过交互范围也不会开面板。
 func _interaction() -> void:
 	# 走过范围不自动开：落点正好在交互范围里，也只是走到
 	var battle := _make()
@@ -273,8 +299,8 @@ func _interaction() -> void:
 	var path_walker := _make()
 	var psim: TavernSim = path_walker["sim"]
 	var pctl: TavernController = path_walker["controller"]
-	psim.spawn_captain("warrior", Vector2(1300, 480))
-	pctl.on_left_click(Vector2(1520, 480))
+	psim.spawn_captain("warrior", Vector2(442, 660))
+	pctl.on_left_click(Vector2(442, 830))
 	var guard := 0
 	while psim.is_moving() and guard < 800:
 		psim.step(TICK)
@@ -317,6 +343,7 @@ func _opens_each() -> bool:
 	return true
 
 
+## 保留交互请求替换、去重和不可达时不打断原命令的验收。
 func _replace_and_dedupe() -> void:
 	# 改道：走向招募途中改点整备，原请求不会随后弹出
 	var battle := _make()
@@ -352,11 +379,7 @@ func _replace_and_dedupe() -> void:
 	_settle(ssim)
 	_check("改点地面后到达不会弹出原面板", ssim.panel == "" and _count(sevents, "panel_opened") == 0 and _count(sevents, "interact_cancelled", {"why": "ground_click"}) == 1)
 	# 交互落点不可达：保留原合法命令并提示
-	var closed_layout: Dictionary = _layout.duplicate(true)
-	for entry: Dictionary in closed_layout["objects"]:
-		if entry["id"] == "recruit":
-			entry["approach"] = {"x": 1700, "y": 880}
-	var shut := _make(closed_layout)
+	var shut := _make(_divided_layout())
 	var shsim: TavernSim = shut["sim"]
 	var shevents: TavernEvents = shut["events"]
 	var shctl: TavernController = shut["controller"]
@@ -375,6 +398,7 @@ func _replace_and_dedupe() -> void:
 
 # ── 面板与输入优先级 ──
 
+## 验证面板输入优先级，移动目标选在实际大厅内。
 func _panels() -> void:
 	var battle := _make()
 	var sim: TavernSim = battle["sim"]
@@ -401,7 +425,7 @@ func _panels() -> void:
 	var moving := _make()
 	var msim: TavernSim = moving["sim"]
 	var mctl: TavernController = moving["controller"]
-	mctl.on_left_click(Vector2(400, 300))
+	mctl.on_left_click(Vector2(490, 520))
 	_steps(msim, 10)
 	var mid := msim.captain_pos
 	msim.open_panel("recruit")
@@ -491,6 +515,7 @@ func _signals_and_log() -> void:
 	_check("信号名正好三个", TavernEvents.SIGNALS == ["tavern_captain_moved", "panel_opened", "panel_closed"])
 
 
+## 从空地及两件落地物附近取样，检查拉直后的实际路线。
 func _random_paths() -> void:
 	var battle := _make()
 	var sim: TavernSim = battle["sim"]
@@ -500,9 +525,10 @@ func _random_paths() -> void:
 	var rejected_blocked := 0
 	var rejected_unreachable := 0
 	var violations := 0
-	for _i in 300:
-		var target := Vector2(rng.randf_range(60.0, 1860.0), rng.randf_range(120.0, 1000.0))
-		var route := sim.nav.find_path(sim.captain_pos, target)
+	var origins := [sim.default_pos(), Vector2(300, 650), Vector2(1510, 565)]
+	for index in 300:
+		var target := Vector2(rng.randf_range(0.0, 1920.0), rng.randf_range(420.0, 1070.0))
+		var route := sim.nav.find_path(origins[index % origins.size()], target)
 		if not bool(route["ok"]):
 			if route["reason"] == "blocked":
 				rejected_blocked += 1
@@ -511,16 +537,24 @@ func _random_paths() -> void:
 			continue
 		accepted += 1
 		var path: Array = route["path"]
-		for index in range(path.size() - 1):
-			var a: Vector2 = path[index]
-			var b: Vector2 = path[index + 1]
+		for segment in range(path.size() - 1):
+			var a: Vector2 = path[segment]
+			var b: Vector2 = path[segment + 1]
 			var length := a.distance_to(b)
 			var samples := maxi(1, int(length / 2.0))
 			for sample in samples + 1:
 				if not sim.nav.on_path_ok(a.lerp(b, float(sample) / float(samples))):
 					violations += 1
-	_check("300 个随机落点：三种结果都出现（可达 %d / 阻挡 %d / 不连通 %d）" % [accepted, rejected_blocked, rejected_unreachable], accepted > 50 and rejected_blocked > 10 and rejected_unreachable > 0)
+	_check("开放大厅的 300 个随机落点（可达 %d / 阻挡 %d / 不连通 %d）" % [accepted, rejected_blocked, rejected_unreachable], accepted > 50 and rejected_blocked > 10 and rejected_unreachable == 0)
 	_check("所有可达路径沿线每 2 像素取样都不在障碍里", violations == 0, str(violations))
+
+
+## 隔开告示牌一侧以保留不可达回归用例，分隔墙只存在于测试布局。
+func _divided_layout() -> Dictionary:
+	var layout := _layout.duplicate(true)
+	var bounds := TavernLayout.rect_of(layout["bounds"])
+	layout["obstacles"].append({"id": "test_divider", "x": 1540, "y": bounds.position.y, "w": 30, "h": bounds.size.y})
+	return layout
 
 
 func _determinism() -> void:

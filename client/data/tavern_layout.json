@@ -1,10 +1,10 @@
 {
-  "_note": "酒馆灰盒布局（程序自有，P3a）。坐标是 1920×1080 场景坐标。位置不进存档。",
+  "_note": "酒馆 1920×1080 场景布局。图层和交互区使用场景坐标，物件占地与排序 Y 相对贴图左上角。位置不进存档。",
   "bounds": {
-    "x": 80,
-    "y": 140,
-    "w": 1760,
-    "h": 840
+    "x": 0,
+    "y": 433,
+    "w": 1920,
+    "h": 637
   },
   "cell": 10,
   "captain": {
@@ -22,46 +22,36 @@
   "arrive_eps": 4,
   "obstacles": [
     {
-      "id": "bar",
-      "x": 700,
-      "y": 140,
-      "w": 520,
-      "h": 120
+      "id": "cargo_counter",
+      "texture": "res://assets/art/tavern/02_cargo_counter.png",
+      "x": 0,
+      "y": 390,
+      "pivot_y": 568,
+      "polygon": [
+        [0, 43],
+        [111, 43],
+        [141, 301],
+        [354, 301],
+        [389, 329],
+        [389, 359],
+        [302, 453],
+        [108, 558],
+        [76, 568],
+        [0, 568]
+      ]
     },
     {
-      "id": "table_a",
-      "x": 420,
-      "y": 520,
-      "w": 200,
-      "h": 130
-    },
-    {
-      "id": "table_b",
-      "x": 1300,
-      "y": 640,
-      "w": 200,
-      "h": 120
-    },
-    {
-      "id": "partition",
-      "x": 900,
-      "y": 420,
-      "w": 60,
-      "h": 400
-    },
-    {
-      "id": "pantry_top",
-      "x": 1560,
-      "y": 760,
-      "w": 280,
-      "h": 30
-    },
-    {
-      "id": "pantry_left",
-      "x": 1560,
-      "y": 760,
-      "w": 30,
-      "h": 220
+      "id": "notice_board",
+      "texture": "res://assets/art/tavern/03_notice_board.png",
+      "x": 1613,
+      "y": 359,
+      "pivot_y": 222,
+      "footprint": {
+        "x": 13,
+        "y": 191,
+        "w": 193,
+        "h": 32
+      }
     }
   ],
   "objects": [
@@ -69,13 +59,13 @@
       "id": "recruit",
       "kind": "recruit",
       "name": "招募伙伴",
-      "x": 200,
-      "y": 140,
-      "w": 160,
-      "h": 80,
+      "x": 1645,
+      "y": 412,
+      "w": 150,
+      "h": 115,
       "approach": {
-        "x": 280,
-        "y": 260
+        "x": 1722,
+        "y": 620
       },
       "range": 60
     },
@@ -83,13 +73,13 @@
       "id": "prepare",
       "kind": "prepare",
       "name": "整备队伍",
-      "x": 1300,
-      "y": 280,
-      "w": 220,
-      "h": 110,
+      "x": 122,
+      "y": 562,
+      "w": 150,
+      "h": 178,
       "approach": {
-        "x": 1410,
-        "y": 440
+        "x": 426,
+        "y": 746
       },
       "range": 60
     },
@@ -97,15 +87,32 @@
       "id": "sortie",
       "kind": "sortie",
       "name": "准备出征",
-      "x": 1760,
-      "y": 420,
-      "w": 80,
-      "h": 200,
+      "x": 875,
+      "y": 191,
+      "w": 150,
+      "h": 136,
       "approach": {
-        "x": 1670,
-        "y": 520
+        "x": 950,
+        "y": 480
       },
       "range": 60
+    }
+  ],
+  "layers": [
+    {
+      "texture": "res://assets/art/tavern/01_walk_floor.png",
+      "x": 0,
+      "y": 433
+    },
+    {
+      "texture": "res://assets/art/tavern/00_fixed_background.png",
+      "x": 0,
+      "y": 0
+    },
+    {
+      "texture": "res://assets/art/tavern/04_bartender.png",
+      "x": 865,
+      "y": 184
     }
   ]
 }
