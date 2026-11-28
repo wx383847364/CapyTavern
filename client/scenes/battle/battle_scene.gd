@@ -402,6 +402,11 @@ func _on_click(pos: Vector2, secondary: bool) -> void:
 func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 	if _leaving or sim == null or (_skill_validation_mode and not _skill_validation_current()):
 		return
+	if hit.get("kind") == "retreat":
+		# 撤退按钮只受理主键，沿用原来的失败结果和回酒馆流程。
+		if not secondary and not _skill_validation_mode:
+			sim.retreat()
+		return
 	if sim.player_controls:
 		_player_click(hit, pos, secondary)
 		return

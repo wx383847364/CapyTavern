@@ -1,23 +1,40 @@
 extends Node2D
-## 战斗灰盒的画面：只读逻辑层给的快照（基本类型字典）来画，不碰结算对象，
-## 也不调用玩法脚本。图形全用引擎内置绘制，不引外部资源。
+## 矿洞、战场单位和 HUD 分层绘制。界面只读战斗快照，绘制和输入共用控件位置。
 
-const PORTRAIT_X := 16.0
-## 队伍面板留在左侧，置于窗口夹具首排下方，右缘留出正式出生区。
-const PORTRAIT_Y := 408.0
-const PORTRAIT_W := 224.0
-const PORTRAIT_H := 84.0
-const PORTRAIT_GAP := 10.0
-const SKILL_W := 196.0
-const SKILL_H := 96.0
-const SKILL_GAP := 12.0
-const SKILL_Y := 962.0
+const MINE_BACKDROP := preload("res://assets/art/battle/00_mine_backdrop.png")
+const MINE_FLOOR := preload("res://assets/art/battle/01_walk_floor.png")
+const MINE_FOREGROUND := preload("res://assets/art/battle/02_mine_foreground.png")
+const HUD_ATLAS := preload("res://assets/ui/battle/hud_atlas.png")
+const TEXTURE_TARGET := Rect2(416, 2, 454, 82)
+const TEXTURE_TARGET_OF_TARGET := Rect2(416, 88, 292, 82)
+const TEXTURE_METER := Rect2(416, 176, 262, 181)
+const TEXTURE_ROW := Rect2(416, 362, 186, 41)
+const TEXTURE_HP_TRACK := Rect2(416, 407, 152, 36)
+const TEXTURE_HP_GREEN := Rect2(416, 447, 144, 24)
+const TEXTURE_HP_RED := Rect2(416, 475, 144, 24)
+const TEXTURE_RETREAT := Rect2(2, 502, 110, 90)
+const TEXTURE_KEYCAP := Rect2(118, 502, 34, 34)
+const TEXTURE_ELITE := Rect2(158, 502, 42, 48)
+const TEXTURE_MAGE := Rect2(208, 502, 42, 48)
+const FLOOR_ORIGIN := Vector2(0, 270)
+const FOREGROUND_ORIGIN := Vector2(0, 824)
+const CLASS_ATLAS_ROW := {"rogue": 0, "warrior": 1, "mage": 2, "priest": 3}
+const SKILL_KEYS := ["Q", "W", "E", "R"]
+const PORTRAIT_X := 35.0
+const PORTRAIT_Y := 20.0
+const PORTRAIT_W := 393.0
+const PORTRAIT_H := 47.0
+const SKILL_W := 87.0
+const SKILL_H := 103.0
+const SKILL_GAP := 4.0
+const SKILL_Y := 956.0
 const BACK_BUTTON := Rect2(830, 650, 260, 70)
-const TARGET_BAR := Rect2(615, 118, 578, 59)
-const TARGET_OF_TARGET_BAR := Rect2(1205, 122, 284, 51)
-const OUTPUT_PANEL := Rect2(1503, 111, 194, 178)
-const THREAT_PANEL := Rect2(1707, 111, 197, 178)
-const SETTINGS_BUTTON := Rect2(24, 111, 108, 40)
+const TARGET_BAR := Rect2(596, 11, 454, 82)
+const TARGET_OF_TARGET_BAR := Rect2(1057, 11, 292, 82)
+const OUTPUT_PANEL := Rect2(1375, 15, 253, 181)
+const THREAT_PANEL := Rect2(1633, 15, 262, 181)
+const SETTINGS_BUTTON := Rect2(535, 108, 92, 37)
+const RETREAT_BUTTON := Rect2(1784, 942, 110, 120)
 const SETTINGS_PANEL := Rect2(658, 331, 604, 533)
 const SETTINGS_CLOSE := Rect2(1101, 799, 125, 40)
 const DisplayPreferences := preload("res://scripts/input/battle_controller.gd")
@@ -56,6 +73,7 @@ const RESULT_REASON := {
 	"all_allies_down": "出战成员全部倒下",
 	"timeout": "120 秒内没打完",
 	"skill_validation_error": "技能配置异常",
+	"retreated": "已撤离本场战斗",
 }
 
 var _snap: Dictionary = {}
@@ -72,6 +90,12 @@ var _back_text: String = "返回（Enter）"
 var _notice: String = ""
 var _toast: String = ""
 var _font: Font = preload("res://scenes/ui/cjk_font.gd").get_font()
+var _foreground_mask: Image
+
+
+## 缓存前景透明度，点击由实际遮挡轮廓决定。
+func _ready() -> void:
+	_foreground_mask = MINE_FOREGROUND.get_image()
 
 
 ## 接收纯数据副本，同时更新绘制与命中共用的本体和头顶标签，并清理过期反馈。
@@ -205,14 +229,20 @@ func hit_test(pos: Vector2) -> Dictionary:
 					return {"kind": "target", "id": unit["id"]}
 			return {"kind": "hud"}
 	for index in 4:
-		if _skill_rect(index).has_point(pos):
-			return {"kind": "skill", "key": ["q", "w", "e", "r"][index]}
+		if _skill_rect(index).grow_side(SIDE_TOP, 7.0).has_point(pos):
+			return {"kind": "skill", "key": SKILL_KEYS[index].to_lower()}
+	if not _snap.get("skill_validation", false) and RETREAT_BUTTON.has_point(pos):
+		return {"kind": "retreat"}
 	var bar := Rect2(_skill_rect(0).position.x - 8, SKILL_Y - 8, 4 * SKILL_W + 3 * SKILL_GAP + 16, SKILL_H + 16)
 	var panel := _portrait_rect(0).merge(_portrait_rect(3)).grow(8.0)
 	if bar.has_point(pos) or panel.has_point(pos):
 		return {"kind": "hud"}
+	var front_point := pos - FOREGROUND_ORIGIN
+	if _foreground_mask != null and Rect2(Vector2.ZERO, MINE_FOREGROUND.get_size()).has_point(front_point):
+		if _foreground_mask.get_pixelv(Vector2i(front_point)).a >= 0.5:
+			return {"kind": "hud"}
 	if _hud.is_empty():
-		return {}
+		return {} if (_snap["arena"] as Rect2).has_point(pos) else {"kind": "hud"}
 	if SETTINGS_BUTTON.has_point(pos):
 		return {"kind": "settings"}
 	if OUTPUT_PANEL.has_point(pos) or THREAT_PANEL.has_point(pos):
@@ -234,18 +264,18 @@ func hit_test(pos: Vector2) -> Dictionary:
 		var distance := absf(offset.x) + absf(offset.y) if diamond else offset.length()
 		if distance <= float(unit["radius"]):
 			return {"kind": "world_target", "id": unit["id"]}
-	return {}
+	# 岩壁、底部岩石外侧及其透明留白都在可走矩形之外。
+	return {} if (_snap["arena"] as Rect2).has_point(pos) else {"kind": "hud"}
 
 
 ## 按队伍槽位返回卡片矩形，绘制及命中共用同一位置。
 func _portrait_rect(slot_index: int) -> Rect2:
-	return Rect2(PORTRAIT_X, PORTRAIT_Y + slot_index * (PORTRAIT_H + PORTRAIT_GAP), PORTRAIT_W, PORTRAIT_H)
+	return Rect2(PORTRAIT_X, PORTRAIT_Y + slot_index * PORTRAIT_H, PORTRAIT_W, PORTRAIT_H)
 
 
+## 正下方四个快捷槽，图标、冷却和鼠标命中共享同一矩形。
 func _skill_rect(index: int) -> Rect2:
-	var total := 4.0 * SKILL_W + 3.0 * SKILL_GAP
-	var start_x := (1920.0 - total) * 0.5
-	return Rect2(start_x + index * (SKILL_W + SKILL_GAP), SKILL_Y, SKILL_W, SKILL_H)
+	return Rect2(780.0 + index * (SKILL_W + SKILL_GAP), SKILL_Y, SKILL_W, SKILL_H)
 
 
 func _text(pos: Vector2, text: String, size: int, color: Color, width: float = -1.0, align: HorizontalAlignment = HORIZONTAL_ALIGNMENT_LEFT) -> void:
@@ -256,9 +286,8 @@ func _text(pos: Vector2, text: String, size: int, color: Color, width: float = -
 func _draw() -> void:
 	if _snap.is_empty():
 		return
-	var arena: Rect2 = _snap["arena"]
-	draw_rect(arena, Color("1b2430"))
-	draw_rect(arena.grow(-6), Color("233040"), false, 2.0)
+	draw_texture(MINE_FLOOR, FLOOR_ORIGIN)
+	draw_texture(MINE_BACKDROP, Vector2.ZERO)
 	var units: Array = _snap["units"]
 	_draw_telegraphs(units, false)
 	_draw_aim()
@@ -283,12 +312,17 @@ func _draw() -> void:
 	if not _hud.is_empty():
 		_draw_combat_numbers(now)
 		_draw_friendly_cast_bar(_controlled)
+	# 前景山石高于战场单位和地面反馈，HUD 始终绘制在前景上方。
+	draw_texture(MINE_FOREGROUND, FOREGROUND_ORIGIN)
 	_draw_portraits(units)
 	_draw_skill_bar(_controlled)
 	_draw_top()
 	if not _hud.is_empty():
 		_draw_player_hud(_controlled)
 	var finished: bool = _snap["finished"]
+	if not finished and not _snap.get("skill_validation", false):
+		draw_texture_rect_region(HUD_ATLAS, Rect2(RETREAT_BUTTON.position, TEXTURE_RETREAT.size), TEXTURE_RETREAT)
+		_text(RETREAT_BUTTON.position + Vector2(0, 113), "撤退", 25, Color("ffe4a1"), RETREAT_BUTTON.size.x, HORIZONTAL_ALIGNMENT_CENTER)
 	var show_final_notice: bool = finished and _snap.get("skill_full_input", false)
 	if show_final_notice:
 		_draw_result()
@@ -458,7 +492,7 @@ func _draw_legacy_world_label(unit: Dictionary) -> void:
 	_text(pos + Vector2(-50, radius + 34.0), String(unit["name"]), 16, Color(1, 1, 1, 0.8), 100.0, HORIZONTAL_ALIGNMENT_CENTER)
 
 
-## 在共用卡片内绘制头像和状态，生命与资源条都从文字列延伸到右侧留白。
+## 队伍槽位使用原素材布局；生命值、资源以及小技能的冷却由当前快照绘制。
 func _draw_portraits(units: Array) -> void:
 	var by_slot: Dictionary = {}
 	for unit: Dictionary in units:
@@ -466,75 +500,88 @@ func _draw_portraits(units: Array) -> void:
 			by_slot[int(unit["slot"])] = unit
 	for slot_index in 4:
 		var rect := _portrait_rect(slot_index)
+		var origin := rect.position
 		var unit: Dictionary = by_slot.get(slot_index, {})
-		var selected := slot_index == _selected_slot and not unit.is_empty()
-		draw_rect(rect, Color(0.06, 0.08, 0.12, 0.85))
-		draw_rect(rect, Color.WHITE if selected else Color(1, 1, 1, 0.15), false, 3.0 if selected else 1.0)
-		_text(rect.position + Vector2(10, 30), str(slot_index + 1), 26, Color(1, 1, 1, 0.9))
+		var keycap := Rect2(origin + Vector2(4, 25), Vector2(25, 22))
+		draw_texture_rect_region(HUD_ATLAS, keycap, TEXTURE_KEYCAP)
+		_text(keycap.position + Vector2(0, 16), str(slot_index + 1), 16, Color.WHITE, keycap.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+		draw_texture_rect_region(HUD_ATLAS, Rect2(origin + Vector2(41, 3), Vector2(157, 41)), TEXTURE_ROW)
 		if unit.is_empty():
-			_text(rect.position + Vector2(50, 50), "空槽", 22, Color(1, 1, 1, 0.3))
+			_text(origin + Vector2(57, 29), "空槽", 17, Color("bca286"))
 			continue
+		var atlas_column := int(CLASS_ATLAS_ROW.get(unit["kind"], 0)) * 100 + 2
 		var alive: bool = unit["alive"]
-		var color := Color.html(String(unit["color"]))
-		draw_circle(rect.position + Vector2(52, 42), 22.0, color if alive else Color(0.3, 0.3, 0.33))
-		_text(rect.position + Vector2(86, 30), String(unit["name"]) + ("  倒下" if not alive else ""), 20, Color.WHITE if alive else Color(1, 1, 1, 0.4))
-		var bar_width := rect.size.x - 86.0 - 14.0
-		_draw_health(Rect2(rect.position + Vector2(86, 40), Vector2(bar_width, 10)), unit)
+		var tint := Color.WHITE if alive else Color(0.45, 0.45, 0.45)
+		draw_texture_rect_region(HUD_ATLAS, Rect2(origin + Vector2(27, 1), Vector2(47, 46)),
+			Rect2(atlas_column, 402, 48, 48), tint)
+		draw_texture_rect_region(HUD_ATLAS, Rect2(origin, Vector2(30, 25)), Rect2(atlas_column, 458, 32, 30), tint)
+		_draw_hud_health(Rect2(origin + Vector2(78, 6), Vector2(118, 33)), unit)
 		var res_ratio := float(unit["res"]) / maxf(1.0, float(unit["res_max"]))
-		draw_rect(Rect2(rect.position + Vector2(86, 56), Vector2(bar_width, 8)), Color(0, 0, 0, 0.7))
-		draw_rect(Rect2(rect.position + Vector2(86, 56), Vector2(bar_width * res_ratio, 8)), RESOURCE_COLOR.get(unit["res_kind"], Color.GRAY))
-		_text(rect.position + Vector2(86, 78), "%d/%d  %s %d" % [unit["hp"], unit["max_hp"], RESOURCE_NAME.get(unit["res_kind"], ""), int(unit["res"])], 13, Color(1, 1, 1, 0.65))
+		draw_rect(Rect2(origin + Vector2(84, 42), Vector2(105, 3)), Color("25180e"))
+		draw_rect(Rect2(origin + Vector2(84, 42), Vector2(105 * res_ratio, 3)), RESOURCE_COLOR.get(unit["res_kind"], Color.GRAY))
+		var views: Array = _snap["skills"].get(unit["id"], [])
+		for index in mini(views.size(), 4):
+			_draw_skill_icon(Rect2(origin + Vector2(201 + index * 47, 4), Vector2(43, 40)), unit, index, views[index])
+		if slot_index == _selected_slot:
+			draw_rect(rect, Color(1.0, 0.76, 0.31, 0.75), false, 1.5)
 
 
-## 新投影仍用原四槽矩形及样式；规则和实现同时满足才可用，双钟只读显示不裁定施法。
+## 技能图标按职业和槽位取原图，冷却及可用状态只读取当前技能投影。
+func _draw_skill_icon(rect: Rect2, actor: Dictionary, index: int, view: Dictionary) -> void:
+	if view.is_empty() or bool(view.get("empty", false)):
+		draw_texture_rect_region(HUD_ATLAS, rect, TEXTURE_KEYCAP, Color(0.6, 0.6, 0.6))
+		return
+	var row := int(CLASS_ATLAS_ROW.get(actor.get("kind", ""), 0))
+	var usable := bool(actor.get("alive", false)) and bool(view.get("preparable", view.get("reason", "") == ""))
+	var tint := Color.WHITE if usable else Color(0.56, 0.56, 0.56)
+	draw_texture_rect_region(HUD_ATLAS, rect, Rect2(2 + index * 100, 2 + row * 100, 96, 96), tint)
+	var cd: float = float(view["cd_left"]) if view.get("cd_left") != null else 0.0
+	if cd > 0.0:
+		var configured: float = float(view["cooldown"]) if view.get("cooldown") != null else cd
+		var fraction := clampf(cd / maxf(0.01, configured), 0.0, 1.0)
+		var mask := Rect2(rect.position + Vector2(4, 4), Vector2(rect.size.x - 8, (rect.size.y - 8) * fraction))
+		draw_rect(mask, Color(0, 0, 0, 0.48))
+		var font_size := 14 if rect.size.x < 50.0 else 25
+		_text(rect.position + Vector2(0, rect.size.y * 0.62), skill_amount_text(cd, true), font_size,
+			Color("ffe2a1"), rect.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+
+
+## 底部只显示当前角色的四个快捷按钮；悬停保留真实技能名称、消耗及两种冷却。
 func _draw_skill_bar(selected: Dictionary) -> void:
-	var views: Array = []
-	if not selected.is_empty():
-		views = _snap["skills"].get(selected["id"], [])
+	var views: Array = _snap["skills"].get(selected.get("id", -1), [])
+	var hovered := -1
 	for index in 4:
 		var rect := _skill_rect(index)
-		draw_rect(rect, Color(0.06, 0.08, 0.12, 0.9))
 		var view: Dictionary = views[index] if index < views.size() else {}
-		if view.is_empty():
-			draw_rect(rect, Color(1, 1, 1, 0.1), false, 1.0)
-			continue
-		var projected: bool = _snap.get("skill_validation", false) or _snap.get("skill_formal", false)
-		var full_input: bool = _snap.get("skill_full_input", false)
-		var reason: String = view["reason"]
-		var configured_cooldown: Variant = view["cooldown"]
-		var cd_left: float = float(view.get("cd_left", 0.0)) if view.get("cd_left") != null else 0.0
-		var usable: bool = view["implemented"] and view["preparable"] if projected else reason == ""
-		if projected:
-			# 仅局部别名兼容旧绘制字段，不把新状态交回旧 check_cast；空槽也明确绘制。
-			view = view.duplicate(true)
-			view["key"] = view["slot"]
-			view["cost"] = view["mana_cost"] if view["mana_cost"] != null else 0.0
-			if view["empty"]:
-				view["name"] = "空槽"
-			elif not view["implemented"]:
-				reason = "NOT_IMPLEMENTED"
-			# 零只供遮罩除法防护；上面的配置原值另存并显示问号，不把缺值当零秒配置。
-			if view["cooldown"] == null:
-				view["cooldown"] = 0.0
-		draw_rect(rect, Color(1, 1, 1, 0.9) if usable else Color(1, 1, 1, 0.2), false, 2.0)
-		_text(rect.position + Vector2(10, 34), String(view["key"]).to_upper(), 30, Color.WHITE if usable else Color(1, 1, 1, 0.45))
-		_text(rect.position + Vector2(52, 30), String(view["name"]), 22, Color.WHITE if usable else Color(1, 1, 1, 0.45))
-		var cost_text := "无消耗" if float(view["cost"]) <= 0.0 else "耗 %d %s" % [int(view["cost"]), RESOURCE_NAME.get(selected["res_kind"], "")]
-		if projected:
-			cost_text = "%s %sm / 耗%s" % [view["target_kind"], str(view["cast_range_m"]), str(view["mana_cost"])] if not view["empty"] else "未配置技能"
-		if full_input:
-			cost_text = _full_skill_cost_text(view)
-		_text(rect.position + Vector2(10, 62), cost_text, 16, Color(1, 1, 1, 0.7))
-		var clocks: String = "CD%ss GCD%ss %s" % [str(configured_cooldown) if configured_cooldown != null else "?", str(snappedf(float(view["gcd_left"]), 0.1)) if view["gcd_left"] != null else "?", "未接入" if not view["implemented"] and not view["empty"] else ""] if projected else "冷却 %ds" % int(view["cooldown"])
-		if full_input and not view["empty"]:
-			clocks = "冷却 %s秒 公共 %s秒" % [skill_amount_text(cd_left, true) if view["cd_left"] != null else "?", skill_amount_text(float(view["gcd_left"]), true) if view["gcd_left"] != null else "?"]
-		_text(rect.position + Vector2(10, 84), clocks, 14, Color(1, 1, 1, 0.5))
-		if cd_left > 0.0:
-			var fraction := clampf(cd_left / maxf(0.01, float(view["cooldown"])), 0.0, 1.0)
-			draw_rect(Rect2(rect.position, Vector2(rect.size.x, rect.size.y * fraction)), Color(0, 0, 0, 0.55))
-			_text(rect.position + Vector2(rect.size.x - 60, 60), skill_amount_text(cd_left, true) if full_input else "%.1f" % cd_left, 26, Color("ffd9a0"), 50.0, HORIZONTAL_ALIGNMENT_RIGHT)
-		elif not usable and not projected:
-			_text(rect.position + Vector2(rect.size.x - 100, 84), String(REASON_TEXT.get(reason, reason)), 14, Color("ff9a9a"), 90.0, HORIZONTAL_ALIGNMENT_RIGHT)
+		_draw_skill_icon(Rect2(rect.position + Vector2(0, 4), Vector2(rect.size.x, 88)), selected, index, view)
+		var keycap := Rect2(rect.position + Vector2(4, -7), Vector2(33, 34))
+		draw_texture_rect_region(HUD_ATLAS, keycap, TEXTURE_KEYCAP)
+		_text(keycap.position + Vector2(0, 24), SKILL_KEYS[index], 20, Color.WHITE, keycap.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+		if not view.is_empty() and not bool(view.get("empty", false)):
+			var label := Rect2(rect.position + Vector2(0, 84), Vector2(rect.size.x, 21))
+			draw_rect(label, Color(0.15, 0.08, 0.03, 0.9))
+			_text(label.position + Vector2(0, 16), String(view["name"]), 15, Color("ffe9bd"), label.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+			if rect.has_point(get_local_mouse_position()):
+				hovered = index
+	if hovered < 0 or _hud.get("settings", false) or _snap["finished"]:
+		return
+	var view: Dictionary = views[hovered]
+	var hint_rect := Rect2(756, 858, 408, 84)
+	_draw_panel(hint_rect)
+	_text(hint_rect.position + Vector2(14, 23), String(view["name"]), 19, Color("ffe9bd"))
+	var detail := ""
+	if view.has("mana_cost"):
+		detail = _full_skill_cost_text(view)
+	else:
+		detail = "无消耗" if float(view["cost"]) <= 0.0 else "消耗 %s %s" % [skill_amount_text(float(view["cost"])), RESOURCE_NAME.get(selected["res_kind"], "")]
+	_text(hint_rect.position + Vector2(14, 46), detail, 16, Color.WHITE)
+	var clock := "冷却 %s秒" % str(view.get("cd_left", 0.0) if view.get("cd_left") != null else "?")
+	if view.get("gcd_left") != null:
+		clock += "   公共 %s秒" % skill_amount_text(float(view["gcd_left"]), true)
+	var reason := String(view.get("reason", ""))
+	if not reason.is_empty():
+		clock += "   " + reason_text(reason)
+	_text(hint_rect.position + Vector2(14, 69), clock, 15, Color("ffd79d"))
 
 
 ## 完整隔离技能栏中文化目标和法力消耗；配置缺值显示问号。
@@ -547,22 +594,26 @@ func _full_skill_cost_text(view: Dictionary) -> String:
 	return "%s %s米 / 耗%s法力" % [target, reach, mana]
 
 
-## 沿用顶部提示；正式模式说明本批天赋和套装范围，隔离仍说明仅设目标。
-## 战斗计时和操作说明与目标条分层绘制。
+## 顶部居中留出目标条、计时和操作提示，暂停提示仍覆盖战场中央。
 func _draw_top() -> void:
 	var left := maxf(0.0, float(_snap["limit"]) - float(_snap["time"]))
 	var minutes := int(left) / 60
 	var seconds := int(left) % 60
-	_text(Vector2(0, 54), "剩余 %d:%02d" % [minutes, seconds], 34, Color.WHITE, 1920.0, HORIZONTAL_ALIGNMENT_CENTER)
-	_text(Vector2(24, 54), "切回窗口后按 P 继续", 20, Color(1, 1, 1, 0.75))
-	var guide: String = "1～4 按队伍槽位选人　左键选择/点地移动　右键点敌人攻击（牧师右键点队友治疗）　Q/W/E/R 技能　P 暂停/继续"
+	var timer := Rect2(846, 104, 228, 45)
+	_draw_panel(timer)
+	_text(timer.position + Vector2(0, 32), "剩余 %d:%02d" % [minutes, seconds], 29, Color("ffe9bd"), timer.size.x, HORIZONTAL_ALIGNMENT_CENTER)
+	var guide := "1–4 换人　左键选择／移动　右键攻击／普疗　Q/W/E/R 技能　P 暂停"
+	if not _hud.is_empty():
+		guide = "1–4 换人　左键选目标　右键走位／攻击／普疗　Tab 切敌　Q/W/E/R 技能　P 暂停"
+	elif _snap.get("skill_validation", false):
+		guide = "技能验证：右键设目标，Q/W/E/R 选技能"
+	var guide_rect := Rect2(519, 196, 827, 34)
+	_draw_panel(guide_rect)
+	_text(guide_rect.position + Vector2(12, 23), guide, 16, Color("ffecda"), guide_rect.size.x - 24, HORIZONTAL_ALIGNMENT_CENTER)
 	if _snap.get("skill_validation", false):
-		guide = "隔离：右键仅设目标；" + _skill_configuration_text()
-	elif not _hud.is_empty():
-		guide = "1–4 / F1–F4 换人    左键选目标    右键走位／攻击／普疗    Tab 切敌    Q/W/E/R 技能    P 暂停／继续"
-	_text(Vector2(24, 82), guide, 20, Color(1, 1, 1, 0.85))
-	if _snap.get("skill_formal", false) and _hud.is_empty():
-		_text(Vector2(24, 107), "旧天赋本批暂不生效，两件套只加对应 Q", 17, Color(1, 1, 1, 0.7))
+		_text(Vector2(532, 250), _skill_configuration_text(), 14, Color("ffecda"), 810.0)
+	elif _snap.get("skill_formal", false) and _hud.is_empty():
+		_text(Vector2(532, 250), "旧天赋本批暂不生效，两件套只加对应 Q", 16, Color("ffecda"))
 	if bool(_snap["paused"]):
 		draw_rect(Rect2(660, 380, 600, 120), Color(0, 0, 0, 0.7))
 		_text(Vector2(660, 442), "已暂停  按 P 继续", 40, Color("ffd9a0"), 600.0, HORIZONTAL_ALIGNMENT_CENTER)
@@ -730,19 +781,42 @@ func _target_of(target: Dictionary) -> Dictionary:
 	return other if other.get("alive", false) else {}
 
 
-## 顶部两层目标共用血量组件，右端身份与头顶标签使用同一偏好。
+## 顶部使用原目标框素材，内层血条和目标身份随当前快照更新。
 func _draw_target_bar(rect: Rect2, unit: Dictionary, label: String) -> void:
-	_draw_panel(rect)
+	var region := TEXTURE_TARGET if rect == TARGET_BAR else TEXTURE_TARGET_OF_TARGET
+	draw_texture_rect_region(HUD_ATLAS, rect, region)
 	if unit.is_empty():
-		_text(rect.position + Vector2(16, 35), label, 20, Color("acb9cb"))
+		_text(rect.position + Vector2(19, 33), label, 20, Color("ddc6a7"))
 		return
-	var badge_width := 74.0 if _hud["prefs"]["names"] else 33.0
-	var badge := Rect2(rect.end.x - badge_width - 8.0, rect.position.y + 6.0, badge_width, rect.size.y - 12.0)
-	_draw_identity(badge, unit)
-	var health_text := "%d/%d" % [roundi(unit["hp"]), roundi(unit["max_hp"])]
-	_text(rect.position + Vector2(12, 22), "%s%s" % [label, unit["name"]], 17, Color("eef3ff"))
-	_draw_health(Rect2(rect.position + Vector2(12, 28), Vector2(rect.size.x - badge_width - 30, 16)), unit)
-	_text(Vector2(badge.position.x - 110, rect.position.y + 41), health_text, 14, Color("ffffff"), 96, HORIZONTAL_ALIGNMENT_RIGHT)
+	var badge_width := 67.0 if _hud["prefs"]["names"] else 42.0
+	var badge := Rect2(rect.end.x - badge_width - 15.0, rect.position.y + 17.0, badge_width, 46.0)
+	if not _hud["prefs"]["names"] and unit["kind"] == "mage":
+		draw_texture_rect_region(HUD_ATLAS, badge, TEXTURE_MAGE)
+	elif not _hud["prefs"]["names"] and unit["side"] == "enemy" and unit["kind"] == "elite":
+		draw_texture_rect_region(HUD_ATLAS, badge, TEXTURE_ELITE)
+	else:
+		_draw_identity(badge, unit)
+	_text(rect.position + Vector2(20, 31), "%s%s" % [label, unit["name"]], 20, Color("fff0d0"), rect.size.x - badge_width - 47)
+	_draw_hud_health(Rect2(rect.position + Vector2(17, 38), Vector2(rect.size.x - badge_width - 46, 30)), unit)
+
+
+## 生命条按实际比例从左到右裁切图集，治疗预览只延伸到未填满的部分。
+func _draw_hud_health(rect: Rect2, unit: Dictionary) -> void:
+	draw_texture_rect_region(HUD_ATLAS, rect, TEXTURE_HP_TRACK)
+	var maximum := maxf(1, float(unit["max_hp"]))
+	var fraction := clampf(float(unit["hp"]) / maximum, 0.0, 1.0)
+	var inner := rect.grow(-4.0)
+	var fill := TEXTURE_HP_GREEN if unit["side"] == "ally" else TEXTURE_HP_RED
+	if fraction > 0.0:
+		draw_texture_rect_region(HUD_ATLAS, Rect2(inner.position, Vector2(inner.size.x * fraction, inner.size.y)),
+			Rect2(fill.position, Vector2(fill.size.x * fraction, fill.size.y)))
+	if unit["id"] == _hud.get("target", -1):
+		var preview := clampf(float(_hud.get("heal_preview", 0.0)) / maximum, 0.0, 1.0 - fraction)
+		if preview > 0.0:
+			draw_rect(Rect2(inner.position + Vector2(inner.size.x * fraction, 0),
+				Vector2(inner.size.x * preview, inner.size.y)), Color(0.55, 1.0, 0.64, 0.46))
+	_text(rect.position + Vector2(0, rect.size.y * 0.68), "%d/%d" % [roundi(unit["hp"]), roundi(unit["max_hp"])],
+		16, Color.WHITE, rect.size.x, HORIZONTAL_ALIGNMENT_CENTER)
 
 
 ## 瞄准层展示实际落点、闪现方向与超距单位的接近提示。
@@ -781,7 +855,7 @@ func _draw_player_hud(actor: Dictionary) -> void:
 		_draw_target_bar(TARGET_OF_TARGET_BAR, other, "读条目标  " if target.get("cast_target_id", -1) >= 0 else "目标的目标  ")
 	var auto: Dictionary = _by_id.get(actor.get("auto_target_id", -1), {})
 	if auto.get("alive", false) and auto["id"] != _hud["target"] and actor.get("attack_kind") == "damage":
-		_text(TARGET_BAR.position + Vector2(12, 80), "普攻：%s" % auto["name"], 17, Color("ffcf80"))
+		_text(TARGET_BAR.position + Vector2(12, 163), "普攻：%s" % auto["name"], 17, Color("ffcf80"))
 	_draw_panel(SETTINGS_BUTTON)
 	_text(SETTINGS_BUTTON.position + Vector2(0, 26), "设置", 19, Color("e3efff"), SETTINGS_BUTTON.size.x, HORIZONTAL_ALIGNMENT_CENTER)
 	_draw_meter(OUTPUT_PANEL, target, false)
@@ -790,8 +864,8 @@ func _draw_player_hud(actor: Dictionary) -> void:
 
 ## 仇恨和输出分别排序，怪物实际目标标记与榜首相互独立。
 func _draw_meter(rect: Rect2, target: Dictionary, threat: bool) -> void:
-	_draw_panel(rect)
-	_text(rect.position + Vector2(12, 25), "仇恨" if threat else "输出  ·  总伤害 / DPS", 18, Color("e3efff"))
+	draw_texture_rect_region(HUD_ATLAS, rect, TEXTURE_METER)
+	_text(rect.position + Vector2(17, 30), "仇恨" if threat else "输出  ·  总伤害 / DPS", 19, Color("fff0d0"))
 	if threat and target.get("side") != "enemy":
 		_text(rect.position + Vector2(12, 55), "选中敌人查看仇恨", 17, Color("a7b5c7"))
 		return
@@ -804,7 +878,7 @@ func _draw_meter(rect: Rect2, target: Dictionary, threat: bool) -> void:
 	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return a["id"] < b["id"] if a["value"] == b["value"] else a["value"] > b["value"])
 	var elapsed := float(_snap["time"])
-	var base_y := 51.0
+	var base_y := 57.0
 	for row in rows:
 		var active: bool = threat and row["id"] == target.get("target_id", -1)
 		var value: float = row["value"]
@@ -814,7 +888,7 @@ func _draw_meter(rect: Rect2, target: Dictionary, threat: bool) -> void:
 		draw_rect(Rect2(rect.position + Vector2(9, base_y - 13), Vector2((rect.size.x - 18) * value / lead, 19)), Color(0.28, 0.40, 0.58, 0.35))
 		_text(rect.position + Vector2(12, base_y + 2), ("▶ " if active else "") + row["name"], 17, color)
 		_text(rect.position + Vector2(73, base_y + 2), amount, 16, color, rect.size.x - 85, HORIZONTAL_ALIGNMENT_RIGHT)
-		base_y += 25
+		base_y += 27
 	if threat and "taunt" in target.get("statuses", []):
 		_text(rect.position + Vector2(12, 163), "嘲讽中", 15, Color("ffd28d"))
 
@@ -883,6 +957,8 @@ func _draw_result() -> void:
 	var won: bool = _snap["result"] == "win"
 	var title_color := Color("6fe08a") if won else Color("ff6b6b")
 	var title := "胜利" if won else "失败"
+	if _snap["reason"] == "retreated":
+		title = "已撤退"
 	if _snap.get("skill_formal", false) and _snap["result"] == "error":
 		title = "战斗中止"
 	_text(Vector2(0, 460), title, 96, title_color, 1920.0, HORIZONTAL_ALIGNMENT_CENTER)

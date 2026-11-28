@@ -1734,6 +1734,12 @@ func _check_end() -> void:
 
 
 ## 结束通知前清理接近、读条及交战状态，回调不能复活旧命令。
+## 主动撤退按失败结算，停止本场指令和施法，由原结果事件通知酒馆。
+func retreat() -> void:
+	if not finished:
+		_finish("lose", "retreated")
+
+
 func _finish(outcome: String, why: String) -> void:
 	finished = true
 	_clear_player_casts()
