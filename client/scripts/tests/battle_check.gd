@@ -86,12 +86,65 @@ func _run_all() -> void:
 	_frost_cases()
 	_approach_cases()
 	_ground_cast_cases()
+	_teammate_health_case()
 	for fps: int in [60, 120]:
 		_motion_scene_case(fps)
 		_remote_motion_case(fps)
 	for primary_index: int in [0, 2, 3]:
 		_player_whirlwind_case(primary_index, false)
 	_player_whirlwind_case(0, true)
+
+
+## 覆盖截图中本体分开但名称区相交的站位，以及贴身、隐藏和切人。
+func _teammate_health_case() -> void:
+	var fixture := _make(["warrior", "rogue", "mage", "priest"], 77)
+	var scene := BattleSceneScript.new()
+	var view := BattleViewScript.new()
+	scene._view = view
+	scene.sim = fixture.sim
+	scene.controller = fixture.controller
+	scene.sim.player_controls = true
+	var screenshot_positions := [Vector2(576, 673), Vector2(651, 578), Vector2(336, 389), Vector2(518, 669)]
+	for slot in 4:
+		scene.sim.slot_unit(slot).pos = screenshot_positions[slot]
+	scene.controller.preferences["names"] = true
+	scene.controller.select_slot(2)
+	scene.controller.select_target(scene.sim.slot_unit(0).id)
+	scene._refresh_view()
+	var priest: Dictionary = view._by_id[scene.sim.slot_unit(3).id]
+	var priest_bar := view._world_label_rect(priest).position + Vector2(12, 12)
+	_check("牧师与战士本体分开、头顶名称区相交时，牧师血条仍可点选",
+		view._world_labels.has(priest) and view.hit_test(priest_bar).get("id") == priest["id"])
+
+	for slot in 4:
+		scene.sim.slot_unit(slot).pos = Vector2(720, 280)
+	for selected in [0, 3]:
+		scene.controller.select_slot(selected)
+		scene._refresh_view()
+		var all_hittable := true
+		for slot in 4:
+			var id: int = scene.sim.slot_unit(slot).id
+			var unit: Dictionary = view._by_id[id]
+			var health_point := view._world_label_rect(unit).position + Vector2(12, 12)
+			all_hittable = all_hittable and view._world_labels.has(unit) and view.hit_test(health_point).get("id") == id
+		_check("靠近顶部重叠时，操控第 %d 位仍可点选所有队友血条" % (selected + 1), all_hittable)
+
+	scene.controller.preferences["teammate_health"] = false
+	for selected in [3, 0]:
+		scene.controller.select_slot(selected)
+		scene._refresh_view()
+		var correct_scope := true
+		for slot in 4:
+			var id: int = scene.sim.slot_unit(slot).id
+			var unit: Dictionary = view._by_id[id]
+			var rect := view._world_label_rect(unit)
+			correct_scope = correct_scope and view._shows_world_health(unit) == (slot == selected)
+			correct_scope = correct_scope and (view.hit_test(rect.position + Vector2(12, 12)).get("id") == id) == (slot == selected)
+			correct_scope = correct_scope and view.hit_test(view._world_badge_rect(rect).get_center()).get("id") == id
+			correct_scope = correct_scope and view.hit_test(view._portrait_rect(slot).get_center()).get("id") == id
+		_check("隐藏后仅第 %d 位操控角色保留头顶血条，队友身份和队伍栏仍可点选" % (selected + 1), correct_scope)
+	view.free()
+	scene.free()
 
 
 ## 使用实际战斗推进、View 和命中入口，覆盖玩家、自动追击的敌人及多人交叉走位。

@@ -35,10 +35,10 @@ const OUTPUT_PANEL := Rect2(1375, 15, 253, 181)
 const THREAT_PANEL := Rect2(1633, 15, 262, 181)
 const SETTINGS_BUTTON := Rect2(535, 108, 92, 37)
 const RETREAT_BUTTON := Rect2(1784, 942, 110, 120)
-const SETTINGS_PANEL := Rect2(658, 331, 604, 533)
+const SETTINGS_PANEL := Rect2(658, 262, 604, 602)
 const SETTINGS_CLOSE := Rect2(1101, 799, 125, 40)
 const DisplayPreferences := preload("res://scripts/input/battle_controller.gd")
-const SETTINGS_OPTIONS := ["names", "release_cast", "tab_health"]
+const SETTINGS_OPTIONS := ["names", "release_cast", "tab_health", "teammate_health"]
 const HIT_FLASH_MS := 100
 const CRITICAL_RING_MS := 150
 const COMBAT_NUMBER_MS := 720
@@ -81,6 +81,7 @@ var _by_id: Dictionary = {}
 var _hud: Dictionary = {}
 var _live_units: Array[Dictionary] = []
 var _world_labels: Array[Dictionary] = []
+var _world_label_offsets: Dictionary = {}
 var _controlled: Dictionary = {}
 var _enemy_hits: Dictionary = {}
 var _combat_numbers: Array[Dictionary] = []
@@ -256,7 +257,11 @@ func hit_test(pos: Vector2, movement: bool = false) -> Dictionary:
 			return {} if movement and arena.has_point(pos) else {"kind": "hud"}
 	if not _hud.is_empty():
 		for unit in _world_labels:
-			if _world_label_rect(unit).has_point(pos):
+			var rect := _world_label_rect(unit)
+			if not _shows_world_health(unit):
+				# 隐藏的血条不接收点击，身份标识仍可用来选目标。
+				rect = _world_badge_rect(rect)
+			if rect.has_point(pos):
 				return {"kind": "world_target", "id": unit["id"]}
 	# 本体按绘制顺序反查；倒下的单位属于地面层，已排除。
 	for index in range(_live_units.size() - 1, -1, -1):
@@ -640,9 +645,10 @@ func _draw_health(rect: Rect2, unit: Dictionary) -> void:
 			draw_rect(Rect2(rect.position + Vector2(filled, 0), Vector2(rect.size.x * preview / maximum, rect.size.y)), Color(0.55, 1.0, 0.64, 0.46))
 
 
-## 按目标、受控角色、读条者和其他单位取舍标签；同优先级先保留前面的本体。
+## 按目标、受控角色、读条者和前排单位安排标签；正式界面的友方标签遇到重叠时错位保留。
 func _update_world_labels() -> void:
 	_world_labels.clear()
+	_world_label_offsets.clear()
 	var controlled_id: int = _controlled.get("id", -1)
 	var target_id: int = _hud.get("target", _controlled.get("target_id", -1))
 	var priority_groups: Array = [[], [], [], []]
@@ -661,7 +667,18 @@ func _update_world_labels() -> void:
 	for group: Array in priority_groups:
 		for unit: Dictionary in group:
 			var bounds := _world_label_bounds(unit, controlled_id, target_id)
-			# 只将实际绘制的标签加入列表，隐藏标签也随之失去命中区域。
+			# 旧版与敌方仍沿用标签避让规则，只有正式界面的友方不会因重叠消失。
+			if not _hud.is_empty() and unit["side"] == "ally":
+				var bounds_rect := bounds[0]
+				var placed := _avoid_world_labels(bounds_rect, occupied, Vector2.UP)
+				if placed.position.y < 200.0 and placed.position != bounds_rect.position:
+					# 靠近顶部 HUD 时改向战场中央横移。
+					var inward := Vector2.RIGHT if unit["pos"].x < 960.0 else Vector2.LEFT
+					placed = _avoid_world_labels(bounds_rect, occupied, inward)
+				_world_label_offsets[unit["id"]] = placed.position - bounds_rect.position
+				occupied.append(placed)
+				_world_labels.append(unit)
+				continue
 			var overlaps := false
 			for rect in bounds:
 				for other in occupied:
@@ -673,6 +690,24 @@ func _update_world_labels() -> void:
 			if not overlaps:
 				occupied.append_array(bounds)
 				_world_labels.append(unit)
+
+
+## 沿固定方向越过碰到的标签，直到整个区域可绘制并可点击。
+func _avoid_world_labels(rect: Rect2, occupied: Array[Rect2], direction: Vector2) -> Rect2:
+	var moved := true
+	while moved:
+		moved = false
+		for other in occupied:
+			if not rect.intersects(other):
+				continue
+			if direction == Vector2.UP:
+				rect.position.y = other.position.y - rect.size.y - 4.0
+			elif direction == Vector2.RIGHT:
+				rect.position.x = other.end.x + 4.0
+			else:
+				rect.position.x = other.position.x - rect.size.x - 4.0
+			moved = true
+	return rect
 
 
 ## 标签按本体中心定位，避让区域同时包含读条、目标箭头和细蓝条。
@@ -697,13 +732,25 @@ func _world_label_bounds(unit: Dictionary, controlled_id: int, target_id: int) -
 	return [_world_label_rect(unit).grow_side(SIDE_TOP, top_margin)]
 
 
-## 血条和身份标识共用跟随本体的命中矩形。
+## 血条和右端身份标识共用避让后的绘制与命中位置。
 func _world_label_rect(unit: Dictionary) -> Rect2:
 	var radius: float = unit["radius"]
 	var bar_width := maxf(64.0, radius * 2.4)
 	var badge := 78.0 if _hud.get("prefs", {}).get("names", false) else 26.0
 	var pos := _body_center(unit)
+	pos += _world_label_offsets.get(unit["id"], Vector2.ZERO)
 	return Rect2(pos + Vector2(-bar_width * 0.5, -radius - 36.0), Vector2(bar_width + badge, 24.0))
+
+
+## 战场开关只控制其他存活队员的头顶血量，切换操控角色后按当前槽位判断。
+func _shows_world_health(unit: Dictionary) -> bool:
+	return unit["side"] != "ally" or unit["id"] == _controlled.get("id", -1) or _hud.get("prefs", {}).get("teammate_health", true)
+
+
+## 身份标识独立绘制并保留命中，宽度按头像或名称偏好取值。
+func _world_badge_rect(rect: Rect2) -> Rect2:
+	var width := 78.0 if _hud.get("prefs", {}).get("names", false) else 26.0
+	return Rect2(rect.end.x - width, rect.position.y, width, rect.size.y)
 
 
 ## 使用灰盒自绘职业与怪物图标；名称偏好和未知类型都显示可读文字。
@@ -743,23 +790,22 @@ func _draw_identity(rect: Rect2, unit: Dictionary) -> void:
 		draw_colored_polygon(path, ink)
 
 
-## 头顶依次显示读条、血量和法力，操控及目标标记仍与身份图标分开。
+## 血量按队友偏好绘制，读条、身份、法力和目标标记随避让位置一起移动。
 func _draw_world_label(unit: Dictionary, controlled: bool) -> void:
 	var rect := _world_label_rect(unit)
-	var icon_width := 78.0 if _hud["prefs"]["names"] else 26.0
-	var badge := Rect2(rect.end.x - icon_width, rect.position.y, icon_width, rect.size.y)
-	var bar_width := rect.size.x - icon_width
-	_draw_health(Rect2(rect.position + Vector2(0, 8), Vector2(bar_width, 8)), unit)
+	var badge := _world_badge_rect(rect)
+	var bar_width := rect.size.x - badge.size.x
+	if _shows_world_health(unit):
+		_draw_health(Rect2(rect.position + Vector2(0, 8), Vector2(bar_width, 8)), unit)
 	_draw_world_mana(unit, rect.position + Vector2(0, 18), bar_width)
 	_draw_identity(badge, unit)
 	var cast: Dictionary = unit["cast"]
 	if not cast.is_empty():
 		var cast_pos := rect.position + Vector2(0, -9)
-		var cast_width := rect.size.x - icon_width
-		draw_rect(Rect2(cast_pos, Vector2(cast_width, 4)), Color("26303c"))
-		draw_rect(Rect2(cast_pos, Vector2(cast_width * float(cast["progress"]), 4)), Color("ffcf5a"))
+		draw_rect(Rect2(cast_pos, Vector2(bar_width, 4)), Color("26303c"))
+		draw_rect(Rect2(cast_pos, Vector2(bar_width * float(cast["progress"]), 4)), Color("ffcf5a"))
 	var targeted: bool = unit["id"] == _hud["target"]
-	var center: Vector2 = Vector2(unit["pos"].x, rect.position.y - 13)
+	var center := rect.position + Vector2(bar_width * 0.5, -13)
 	if controlled:
 		var base := center + Vector2(-10 if targeted else 0, 0)
 		draw_colored_polygon(PackedVector2Array([base + Vector2(-8, -12), base + Vector2(8, -12), base + Vector2(0, 0)]), Color("73f6ac"))
@@ -906,9 +952,9 @@ func _draw_panel(rect: Rect2) -> void:
 	draw_rect(rect, Color("52657c"), false, 1.0)
 
 
-## 当前设置值与实际命中矩形共用行定义。
+## 四个战斗开关在显示档位上方排布，绘制与点击共用行矩形。
 func _option_rect(index: int) -> Rect2:
-	return Rect2(692, 404 + 69 * index, 532, 50)
+	return Rect2(692, 335 + 69 * index, 532, 50)
 
 
 ## 两组显示档位使用同一行几何，保证不可用档位也能正确拦截点击。
@@ -939,7 +985,7 @@ func _draw_display_options(prefs: Dictionary) -> void:
 			_text(rect.position + Vector2(0, 23), label, 16, Color("eef3ff") if available else Color("65738a"), rect.size.x, HORIZONTAL_ALIGNMENT_CENTER)
 
 
-## 暂停设置保留清晰的模态边界，关闭操作与鼠标选项均由场景消费。
+## 暂停设置显示各开关的当前值，关闭操作和选项点击均由场景消费。
 func _draw_settings() -> void:
 	draw_rect(Rect2(0, 0, 1920, 1080), Color(0, 0, 0, 0.60))
 	_draw_panel(SETTINGS_PANEL)
@@ -947,7 +993,8 @@ func _draw_settings() -> void:
 	var prefs: Dictionary = _hud["prefs"]
 	var items := ["身份显示     %s" % ("名称" if prefs["names"] else "头像"),
 		"施法方式     %s" % ("按住预览，松开施放" if prefs["release_cast"] else "按下立即施放"),
-		"Tab 排序     %s" % ("当前生命值最低" if prefs["tab_health"] else "就近")]
+		"Tab 排序     %s" % ("当前生命值最低" if prefs["tab_health"] else "就近"),
+		"队友血条     %s" % ("显示" if prefs.get("teammate_health", true) else "隐藏")]
 	for index in items.size():
 		var row := _option_rect(index)
 		_draw_panel(row)
