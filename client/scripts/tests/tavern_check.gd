@@ -15,12 +15,13 @@ var _failures: int = 0
 var _layout: Dictionary = {}
 
 
-## 在同一入口检查酒馆规则与显示路径。
+## 在同一入口检查酒馆布局、分层配置、移动与显示路径。
 func _initialize() -> void:
 	_layout = TavernLayout.load_layout()
 	var problems := TavernLayout.validate(_layout)
 	_check("布局可用", problems.is_empty(), ", ".join(problems))
 	if problems.is_empty():
+		_render_layout()
 		_geometry()
 		_movement()
 		_display_corners()
@@ -37,6 +38,27 @@ func _initialize() -> void:
 		_determinism()
 	print("RESULT: %s (%d 条失败)" % ["FAIL" if _failures > 0 else "ALL PASS", _failures])
 	quit(1 if _failures > 0 else 0)
+
+
+## 用现有素材校验分层接入，保证可排序装饰与障碍分开，并定位无效配置的物件和字段。
+func _render_layout() -> void:
+	var layout := _layout.duplicate(true)
+	var decoration := {"id": "test_decoration", "texture": layout["layers"][0]["texture"], "x": 0, "y": 0, "pivot_y": 16}
+	var overhead := {"texture": decoration["texture"], "x": 0, "y": 0, "foreground": true}
+	layout["layers"].append(decoration)
+	layout["layers"].append(overhead)
+	_check("布局接受可排序装饰与固定前景", TavernLayout.validate(layout).is_empty())
+	decoration["id"] = layout["obstacles"][1]["id"]
+	overhead["pivot_y"] = 16
+	var cargo: Dictionary = layout["obstacles"][0]
+	cargo["sort_edge"] = [[1, 0], [1, 5]]
+	var errors := "\n".join(TavernLayout.validate(layout))
+	_check("布局报告重复排序 ID、无效折线和前景互斥字段", errors.contains("notice_board 的排序 id")
+		and errors.contains("cargo_counter 的 sort_edge") and errors.contains("foreground 与 pivot_y"), errors)
+	cargo["pivot_y"] = "568"
+	errors = "\n".join(TavernLayout.validate(layout))
+	_check("布局拒绝两种排序并用和非数值排序点", errors.contains("cargo_counter 的 pivot_y、sort_edge")
+		and errors.contains("cargo_counter 的 pivot_y 需要有限数值"), errors)
 
 
 func _check(name: String, ok: bool, detail: String = "") -> void:

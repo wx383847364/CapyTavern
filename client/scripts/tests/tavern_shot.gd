@@ -89,7 +89,7 @@ func _wait(seconds: float) -> void:
 	await create_timer(seconds).timeout
 
 
-## 在大厅里实际点击走过两个占地，并用当前帧与开场底图比对前后遮挡。
+## 在大厅里实际点击绕过两个占地，并用当前帧与开场底图比对前后遮挡。
 func _run() -> void:
 	var sim = _scene.sim
 	var view := _scene.get_node("View")
@@ -117,6 +117,7 @@ func _run() -> void:
 	await _click(MOUSE_BUTTON_RIGHT, Vector2(350, 730))
 	_check("点货台占地：不动、不开面板", not sim.is_moving() and sim.panel == "" and sim.captain_pos == lower_left)
 	await _shot("03_blocked_toast")
+	await _cargo_edge(view, baseline)
 
 	var board_left := Vector2(1510, 565)
 	var board_right := Vector2(1870, 565)
@@ -188,5 +189,74 @@ func _run() -> void:
 	await _wait(0.2)
 	_check("点面板上的关闭按钮：面板关闭", sim.panel == "", sim.panel)
 	await _shot("08_after_close")
+	await _configured_layers(view)
 	print("RESULT: %s (%d 条失败)" % ["FAIL" if _failures > 0 else "ALL PASS", _failures])
 	quit(1 if _failures > 0 else 0)
+
+
+## 贴着货台斜边走到右端，并在占地外、身体仍重叠的位置对照绘制和命中。
+func _cargo_edge(view: Node, baseline: Image) -> void:
+	var sim = _scene.sim
+	var slope := Vector2(250, 891)
+	var slope_probe := Vector2(250, 869)
+	await _click(MOUSE_BUTTON_RIGHT, slope)
+	await _wait_idle()
+	var slope_front := await _shot("09_cargo_slope_front")
+	_check("斜边前：角色盖住货台像素并可命中", sim.captain_pos.is_equal_approx(slope)
+		and view.captain_body_at(slope_probe)
+		and not _pixel(slope_front, slope_probe).is_equal_approx(_pixel(baseline, slope_probe)))
+	var corner_front := Vector2(399, 759)
+	for point in [Vector2(300, 863), Vector2(360, 797), corner_front]:
+		await _click(MOUSE_BUTTON_RIGHT, point)
+		await _wait_idle()
+		_check("沿货台前沿到达 %s" % point, sim.captain_pos.is_equal_approx(point), str(sim.captain_pos))
+	var corner_probe := Vector2(386, 732)
+	var front := await _shot("10_cargo_corner_front")
+	_check("占地右端之外的前侧：身体在柜角上方且可命中", view.captain_body_at(corner_probe)
+		and not _pixel(front, corner_probe).is_equal_approx(_pixel(baseline, corner_probe)))
+	var corner_back := Vector2(399, 747)
+	await _click(MOUSE_BUTTON_RIGHT, corner_back)
+	await _wait_idle()
+	var back := await _shot("11_cargo_corner_back")
+	_check("绕到右端后侧：柜角盖住身体，脚下点击圆也服从遮挡", sim.captain_pos.is_equal_approx(corner_back)
+		and not view.captain_body_at(corner_probe) and not view.captain_at(corner_probe)
+		and _pixel(back, corner_probe).is_equal_approx(_pixel(baseline, corner_probe)))
+
+
+## 用同一大厅临时拼出可穿过装饰、叠图和固定前景，验证配置驱动的渲染规则。
+func _configured_layers(view: Node) -> void:
+	var sim = _scene.sim
+	var layout: Dictionary = sim.layout.duplicate(true)
+	var texture: String = layout["obstacles"][1]["texture"]
+	var low := {"id": "decoration_low", "texture": texture, "x": 700, "y": 500, "pivot_y": 222}
+	var high := {"id": "decoration_high", "texture": texture, "x": 730, "y": 500,
+		"sort_edge": [[0, 260], [70, 115], [190, 115], [217, 260]]}
+	var nav := preload("res://scripts/tavern/tavern_nav.gd").new()
+	layout["layers"].append(low)
+	nav.setup(layout)
+	view.configure(layout, view._class_colors)
+	var gap_feet := Vector2(808, 720)
+	await _click(MOUSE_BUTTON_RIGHT, gap_feet)
+	await _wait_idle()
+	_check("可排序装饰可走进，牌面盖住角色，支脚镂空仍可命中", nav.walkable(gap_feet)
+		and sim.captain_pos.is_equal_approx(gap_feet) and not view.captain_at(Vector2(808, 689))
+		and view.captain_body_at(Vector2(808, 710)) and not view._captain_fully_covered)
+	layout["layers"].append(high)
+	view.configure(layout, view._class_colors)
+	var reference := await _shot("12_overlapping_decorations")
+	var feet := Vector2(810, 635)
+	var probe := Vector2(810, 613)
+	await _click(MOUSE_BUTTON_RIGHT, feet)
+	await _wait_idle()
+	var covered := await _shot("13_overlap_keeps_prop_order")
+	_check("两件装饰排序冲突时保持原有叠放顺序", sim.captain_pos.is_equal_approx(feet)
+		and not view.captain_body_at(probe) and _pixel(covered, probe).is_equal_approx(_pixel(reference, probe)))
+	layout["layers"].erase(low)
+	view.configure(layout, view._class_colors)
+	await process_frame
+	_check("折线装饰单独出现时允许角色站在前方", view.captain_body_at(probe))
+	high.erase("sort_edge")
+	high["foreground"] = true
+	view.configure(layout, view._class_colors)
+	await process_frame
+	_check("固定前景同样遮挡显示和命中", not view.captain_body_at(probe) and view._captain_fully_covered)
