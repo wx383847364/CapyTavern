@@ -26,6 +26,7 @@ func _initialize() -> void:
 		_display_corners()
 		_invalid_clicks()
 		_right_click_and_focus()
+		_direction_input()
 		_interaction()
 		_replace_and_dedupe()
 		_panels()
@@ -142,7 +143,7 @@ func _movement() -> void:
 	var target := Vector2(80, 1010)
 	var straight_blocked := not sim.nav.segment_clear(sim.captain_pos, target)
 	_check("货台接地多边形截断直线路径", straight_blocked)
-	var result := controller.on_left_click(target)
+	var result := controller.on_right_click(target)
 	_check("点可达地面：接受，路径有绕行点", result["ok"] and int(result["waypoints"]) >= 3, str(result))
 	var last := sim.captain_pos
 	var max_step := 0.0
@@ -175,13 +176,13 @@ func _movement() -> void:
 	_check("站住后不再发移动信号", _count(events, "tavern_captain_moved") == before)
 	# 移动中改点另一处：只保留最新落点
 	var second := Vector2(1400, 900)
-	controller.on_left_click(Vector2(480, 500))
+	controller.on_right_click(Vector2(480, 500))
 	_steps(sim, 5)
-	controller.on_left_click(second)
+	controller.on_right_click(second)
 	_settle(sim)
 	_check("移动中点另一处：改走新路径，只去最新落点", sim.captain_pos.distance_to(second) < 0.01, str(sim.captain_pos))
 	# 点队长自己
-	controller.on_left_click(Vector2(480, 500))
+	controller.on_right_click(Vector2(480, 500))
 	_steps(sim, 3)
 	var dest_before := sim.destination
 	var self_click := controller.on_left_click(sim.captain_pos)
@@ -230,26 +231,27 @@ func _invalid_clicks() -> void:
 	var events: TavernEvents = battle["events"]
 	var controller: TavernController = battle["controller"]
 	var good := Vector2(700, 700)
-	controller.on_left_click(good)
+	controller.on_right_click(good)
 	_steps(sim, 4)
-	var cargo_click := controller.on_left_click(Vector2(350, 730))
+	var cargo_click := controller.on_right_click(Vector2(350, 730))
 	_check("点货台占地：拒绝，原因 blocked", not cargo_click["ok"] and cargo_click["reason"] == "blocked", str(cargo_click))
 	_check("无效点击不覆盖原合法命令", sim.is_moving() and sim.destination == good)
-	var outside := controller.on_left_click(Vector2(10, 10))
+	var outside := controller.on_right_click(Vector2(10, 10))
 	_check("点场景外：同样 blocked，原命令保留", not outside["ok"] and sim.destination == good)
-	var across := controller.on_left_click(Vector2(1700, 880))
+	var across := controller.on_right_click(Vector2(1700, 880))
 	_check("点能站但不连通的区域：unreachable，原命令保留", not across["ok"] and across["reason"] == "unreachable" and sim.destination == good, str(across))
-	var board_click := controller.on_left_click(Vector2(1722, 570))
+	var board_click := controller.on_right_click(Vector2(1722, 570))
 	_check("点告示牌底座：blocked", not board_click["ok"] and board_click["reason"] == "blocked")
 	_settle(sim)
 	_check("被拒绝之后原合法命令照常走完", sim.captain_pos.distance_to(good) < 0.01)
 	_check("四次拒绝都进日志", _count(events, "command_rejected", {"kind": "move"}) == 4, str(_count(events, "command_rejected")))
 	# 靠近阻挡边缘一点点的落点也不会让人穿墙：能走到的点都不在外扩障碍里
 	var near_wall := Vector2(1100, sim.nav.bounds().position.y + sim.nav.radius() + 3)
-	var near_result := controller.on_left_click(near_wall)
+	var near_result := controller.on_right_click(near_wall)
 	_check("贴边落点要么拒绝要么站得住，不会卡进墙里", (not near_result["ok"]) or sim.nav.on_path_ok(near_wall))
 
 
+## 右键接管旧交互，失焦仍能结束路线。
 func _right_click_and_focus() -> void:
 	var battle := _make()
 	var sim: TavernSim = battle["sim"]
@@ -258,13 +260,16 @@ func _right_click_and_focus() -> void:
 	controller.on_left_click(_object_center(sim, "recruit"))
 	_steps(sim, 6)
 	_check("测试前提：正在走向招募并有待交互", sim.is_moving() and sim.pending_object == "recruit")
-	var stopped_at := sim.captain_pos
-	var result := controller.on_right_click()
-	_check("右键：停步并取消待交互", result["ok"] and not sim.is_moving() and sim.pending_object == "", str(result))
-	_steps(sim, 40)
-	_check("右键后不再走，也不会补开面板", sim.captain_pos == stopped_at and sim.panel == "" and _count(events, "panel_opened") == 0)
-	_check("日志记了停步原因和取消原因", _count(events, "movement_stopped", {"why": "right_click"}) == 1 and _count(events, "interact_cancelled", {"why": "right_click"}) == 1)
-	_check("没在走时右键不报错也不记日志", controller.on_right_click()["ok"] and _count(events, "movement_stopped") == 1)
+	var landing := Vector2(700, 700)
+	var result := controller.on_right_click(landing)
+	_check("右键改为走向落点，取消待交互", result["ok"] and sim.is_moving()
+		and sim.pending_object == "" and sim.destination == landing, str(result))
+	var left := controller.on_left_click(Vector2(1080, 540))
+	_check("左键空地维持当前路线", left.get("ignored", false) and sim.destination == landing)
+	_settle(sim)
+	_check("右键落点到达后停步，原交互不再打开", sim.captain_pos == landing
+		and sim.panel == "" and _count(events, "panel_opened") == 0)
+	_check("日志记录改点地面取消交互", _count(events, "interact_cancelled", {"why": "ground_click"}) == 1)
 	# 失去焦点
 	var focus := _make()
 	var fsim: TavernSim = focus["sim"]
@@ -277,6 +282,51 @@ func _right_click_and_focus() -> void:
 	_check("失去焦点：停步并取消待交互，回来后不续走也不开面板", not fsim.is_moving() and fsim.pending_object == "" and fsim.captain_pos == held and fsim.panel == "")
 
 
+## 方向输入经过 InputMap 进入原控制器，测试速度、回中与按脚下判定。
+func _direction_input() -> void:
+	var test := _make()
+	var sim: TavernSim = test["sim"]
+	var controller: TavernController = test["controller"]
+	var origin := sim.captain_pos
+	Input.action_press("move_key_right")
+	Input.action_press("move_key_up")
+	controller.update_direction(true)
+	sim.step(TICK)
+	var diagonal := sim.captain_pos - origin
+	_check("方向键斜向以原速度走位", diagonal.x > 0.0 and diagonal.y < 0.0 and is_equal_approx(diagonal.length(), 11.0))
+	var landing := Vector2(1300, 700)
+	controller.on_right_click(landing)
+	controller.update_direction(true)
+	_check("鼠标能接管按住的方向键", sim.move_direction == Vector2.ZERO and sim.destination == landing)
+	Input.action_release("move_key_right")
+	Input.action_release("move_key_up")
+	controller.update_direction(true)
+	Input.action_press("move_stick_down", 0.1)
+	controller.update_direction(true)
+	_check("摇杆死区内保留现有路线", sim.move_direction == Vector2.ZERO and sim.destination == landing)
+	Input.action_press("move_stick_down", 0.6)
+	var before := sim.captain_pos
+	controller.update_direction(true)
+	sim.step(TICK)
+	_check("左摇杆越过死区后按幅度走位", sim.path.is_empty()
+		and absf(sim.captain_pos.y - before.y - 5.5) < 0.001 and sim.captain_pos.x == before.x)
+	Input.action_release("move_stick_down")
+	controller.update_direction(true)
+	var stopped := sim.captain_pos
+	sim.step(TICK)
+	_check("摇杆回中后停止，不恢复旧路线", not sim.is_moving() and sim.captain_pos == stopped)
+	_check("同一个脚点可贴近墙和告示牌，角色显示范围可以重叠",
+		sim.nav.radius() == 8.0 and sim.nav.click_ok(Vector2(1100, 442))
+		and sim.nav.click_ok(Vector2(1722, 541)) and not sim.nav.click_ok(Vector2(1722, 543)))
+	var foot := Vector2(1600, 560)
+	sim.spawn_captain("warrior", foot)
+	sim.set_move_direction(Vector2(1, 0.22))
+	for index in 6:
+		sim.step(TICK)
+	_check("斜推告示牌边缘沿侧面滑动，脚点路径始终在外", sim.captain_pos.y > foot.y
+		and sim.captain_pos.x <= 1618.0 and sim.nav.walkable(sim.captain_pos))
+
+
 # ── 交互点 ──
 
 ## 检查三个场景入口的走近规则，普通走过交互范围也不会开面板。
@@ -287,12 +337,12 @@ func _interaction() -> void:
 	var events: TavernEvents = battle["events"]
 	var controller: TavernController = battle["controller"]
 	var recruit_approach: Vector2 = sim.object_info("recruit")["approach"]
-	controller.on_left_click(recruit_approach)
+	controller.on_right_click(recruit_approach)
 	_settle(sim)
 	_check("点地面走进招募点范围：到达，但不开面板", sim.captain_pos.distance_to(recruit_approach) < 0.01 and sim.panel == "" and _count(events, "panel_opened") == 0)
 	# 路过：从招募点一路走到整备点，途中经过别的交互点范围
 	var sortie_approach: Vector2 = sim.object_info("sortie")["approach"]
-	controller.on_left_click(sortie_approach)
+	controller.on_right_click(sortie_approach)
 	_settle(sim)
 	_check("点地面走到出征点范围：同样不开面板", sim.panel == "" and _count(events, "panel_opened") == 0)
 	var crossed := false
@@ -300,7 +350,7 @@ func _interaction() -> void:
 	var psim: TavernSim = path_walker["sim"]
 	var pctl: TavernController = path_walker["controller"]
 	psim.spawn_captain("warrior", Vector2(442, 660))
-	pctl.on_left_click(Vector2(442, 830))
+	pctl.on_right_click(Vector2(442, 830))
 	var guard := 0
 	while psim.is_moving() and guard < 800:
 		psim.step(TICK)
@@ -374,7 +424,7 @@ func _replace_and_dedupe() -> void:
 	var sctl: TavernController = swap["controller"]
 	sctl.on_left_click(_object_center(ssim, "recruit"))
 	_steps(ssim, 5)
-	sctl.on_left_click(Vector2(700, 700))
+	sctl.on_right_click(Vector2(700, 700))
 	_check("改点地面：待交互取消", ssim.pending_object == "")
 	_settle(ssim)
 	_check("改点地面后到达不会弹出原面板", ssim.panel == "" and _count(sevents, "panel_opened") == 0 and _count(sevents, "interact_cancelled", {"why": "ground_click"}) == 1)
@@ -383,7 +433,7 @@ func _replace_and_dedupe() -> void:
 	var shsim: TavernSim = shut["sim"]
 	var shevents: TavernEvents = shut["events"]
 	var shctl: TavernController = shut["controller"]
-	shctl.on_left_click(Vector2(700, 700))
+	shctl.on_right_click(Vector2(700, 700))
 	_steps(shsim, 4)
 	var dest := shsim.destination
 	var bad := shctl.on_left_click(_object_center(shsim, "recruit"))
@@ -411,7 +461,7 @@ func _panels() -> void:
 	_check("面板里点地面：不移动（panel_open）", not ground["ok"] and ground["reason"] == "panel_open" and not sim.is_moving())
 	var object := controller.on_left_click(_object_center(sim, "recruit"))
 	_check("面板打开时点场景对象：不处理、不换面板", not object["ok"] and sim.panel == "prepare" and sim.pending_object == "")
-	var right := controller.on_right_click()
+	var right := controller.on_right_click(Vector2(700, 700))
 	_check("面板打开时右键不穿透到场景", not right["ok"] and right["reason"] == "panel_open")
 	_steps(sim, 30)
 	_check("面板打开期间队长位置始终不变", sim.captain_pos == held)
@@ -425,7 +475,7 @@ func _panels() -> void:
 	var moving := _make()
 	var msim: TavernSim = moving["sim"]
 	var mctl: TavernController = moving["controller"]
-	mctl.on_left_click(Vector2(490, 520))
+	mctl.on_right_click(Vector2(490, 520))
 	_steps(msim, 10)
 	var mid := msim.captain_pos
 	msim.open_panel("recruit")
@@ -459,7 +509,7 @@ func _zero_members() -> void:
 	var events: TavernEvents = battle["events"]
 	var controller: TavernController = battle["controller"]
 	_check("零成员：场景里没有角色", not sim.has_captain)
-	var ground := controller.on_left_click(Vector2(700, 700))
+	var ground := controller.on_right_click(Vector2(700, 700))
 	_check("零成员点地面：无事发生（no_captain）", not ground["ok"] and ground["reason"] == "no_captain")
 	var recruit := controller.on_left_click(_object_center(sim, "recruit"))
 	_check("零成员点招募公告板：直接开招募面板", recruit.get("opened", false) and sim.panel == "recruit" and _count(events, "panel_opened", {"kind": "recruit"}) == 1)
@@ -565,7 +615,7 @@ func _determinism() -> void:
 		var controller: TavernController = battle["controller"]
 		controller.on_left_click(_object_center(sim, "recruit"))
 		_steps(sim, 9)
-		controller.on_left_click(Vector2(700, 700))
+		controller.on_right_click(Vector2(700, 700))
 		_steps(sim, 15)
 		controller.on_left_click(_object_center(sim, "sortie"))
 		_settle(sim)

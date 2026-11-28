@@ -1,7 +1,7 @@
 extends RefCounted
 ## 酒馆逻辑（纯数据、固定步长，不依赖场景和动画）。
 ## 规则出处：doc/方案与数据/游戏操作功能设计.md §1.1～§1.4。
-##   - 只有队长一个角色；点地移动，点交互点先走近、到达后才开面板；走过范围不自动开。
+##   - 只有队长一个角色；右键点地或持续方向输入移动，点交互点先走近、到达后才开面板；走过范围不自动开。
 ##   - 同一时刻只有一个待交互对象，最新的命令替换旧的；不合法的点击不覆盖原合法命令。
 ##   - 面板打开：队长站住、取消待交互，场景点击和右键都不处理；一次 Esc 只关一层。
 ##   - 失去焦点：停步并取消待交互。
@@ -24,7 +24,8 @@ var captain_pos: Vector2 = Vector2.ZERO
 ## 朝向（弧度），换队长时保持。
 var captain_facing: float = 0.0
 
-## 当前路径（含起点）与走到第几个点；空表示站着。
+## 方向输入与当前路径互斥，路径包含起点。
+var move_direction := Vector2.ZERO
 var path: Array[Vector2] = []
 var path_index: int = 0
 var destination: Vector2 = Vector2.ZERO
@@ -83,7 +84,7 @@ func swap_captain_class(class_id: String) -> void:
 	if not has_captain:
 		return
 	captain_class = class_id
-	if not path.is_empty():
+	if is_moving():
 		_stop("captain_swapped")
 	_cancel_pending("captain_swapped")
 
@@ -96,8 +97,9 @@ func default_pos() -> Vector2:
 	return TavernLayout.point_of(layout["default_pos"])
 
 
+## 路线与持续走位都算移动状态。
 func is_moving() -> bool:
-	return not path.is_empty()
+	return not path.is_empty() or not move_direction.is_zero_approx()
 
 
 # ── 命令 ──
@@ -113,7 +115,7 @@ func _reject(kind: String, reason: String) -> Dictionary:
 	return {"ok": false, "reason": reason}
 
 
-## 左键点地面。
+## 右键走向可达地面，只有有效落点才接管当前移动。
 func click_ground(pos: Vector2) -> Dictionary:
 	if panel != "":
 		return _reject("move", "panel_open")
@@ -159,16 +161,19 @@ func click_object(object_id: String) -> Dictionary:
 	return _ok({"waypoints": path.size()})
 
 
-## 场景右键：停步并取消待交互。面板打开时不处理（不穿透）。
-func right_click() -> Dictionary:
-	if panel != "":
-		return _reject("stop", "panel_open")
-	if path.is_empty() and pending_object == "":
-		return _ok({"changed": false})
-	if not path.is_empty():
-		_stop("right_click")
-	_cancel_pending("right_click")
-	return _ok({"changed": true})
+## 持续方向输入覆盖鼠标路线；松开只停止本次持续走位。
+func set_move_direction(direction: Vector2) -> void:
+	if direction.is_zero_approx():
+		if not move_direction.is_zero_approx():
+			_stop("direction_released")
+		return
+	if not has_captain or panel != "":
+		return
+	if move_direction.is_zero_approx():
+		if not path.is_empty():
+			_stop("direction_input")
+		_cancel_pending("direction_input")
+	move_direction = direction.limit_length()
 
 
 ## 打开面板（场景交互到达、常驻按钮都走这里）。已开着同一个面板时什么也不做；
@@ -182,7 +187,7 @@ func open_panel(kind: String) -> Dictionary:
 		var previous := panel
 		panel = ""
 		events.fire(&"panel_closed", [previous])
-	if not path.is_empty():
+	if is_moving():
 		_stop("panel_opened")
 	_cancel_pending("panel_opened")
 	panel = kind
@@ -207,7 +212,7 @@ func escape() -> bool:
 
 ## 失去程序焦点：停步并取消待交互，回来后等新输入。
 func focus_lost() -> void:
-	if not path.is_empty():
+	if is_moving():
 		_stop("focus_lost")
 	_cancel_pending("focus_lost")
 
@@ -235,7 +240,7 @@ func object_ids() -> Array:
 
 ## 点在队长身上（点队长自己不做任何事）。
 func captain_at(pos: Vector2) -> bool:
-	return has_captain and pos.distance_to(captain_pos) <= nav.radius()
+	return has_captain and pos.distance_to(captain_pos) <= float(layout["captain"]["radius"])
 
 
 func _in_range(info: Dictionary) -> bool:
@@ -248,7 +253,16 @@ func _in_range(info: Dictionary) -> bool:
 func step(dt: float, corners := PackedVector2Array()) -> void:
 	time += dt
 	events.now = time
-	if path.is_empty() or panel != "":
+	if panel != "":
+		return
+	if not move_direction.is_zero_approx():
+		var next := nav.step_direction(captain_pos, move_direction * _speed * dt)
+		if not next.is_equal_approx(captain_pos):
+			captain_facing = (next - captain_pos).angle()
+			captain_pos = next
+			events.fire(&"tavern_captain_moved", [captain_pos])
+		return
+	if path.is_empty():
 		return
 	var budget := _speed * dt
 	var moved := false
@@ -296,7 +310,9 @@ func _arrive() -> void:
 		open_panel(String(info["kind"]))
 
 
+## 有效鼠标路线接管持续输入，保留精确终点。
 func _begin_path(route: Array) -> void:
+	move_direction = Vector2.ZERO
 	path.clear()
 	for point: Vector2 in route:
 		path.append(point)
@@ -304,7 +320,9 @@ func _begin_path(route: Array) -> void:
 	destination = path[path.size() - 1]
 
 
+## 清空两种移动，并记录本次停步原因。
 func _stop(why: String) -> void:
+	move_direction = Vector2.ZERO
 	path.clear()
 	path_index = 0
 	events.fire(&"movement_stopped", [why, captain_pos])
@@ -316,7 +334,9 @@ func _cancel_pending(why: String) -> void:
 		pending_object = ""
 
 
+## 生成或移除队长时清除角色的全部移动状态。
 func _clear_motion() -> void:
+	move_direction = Vector2.ZERO
 	path.clear()
 	path_index = 0
 	pending_object = ""

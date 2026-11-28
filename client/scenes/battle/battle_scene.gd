@@ -7,6 +7,7 @@ const BattleSim := preload("res://scripts/battle/battle_sim.gd")
 const BattleEvents := preload("res://scripts/battle/battle_events.gd")
 const BattleConfig := preload("res://scripts/battle/battle_config.gd")
 const BattleLaunch := preload("res://scripts/battle/battle_launch.gd")
+const MovementInput := preload("res://scripts/input/movement_input.gd")
 const BattleController := preload("res://scripts/input/battle_controller.gd")
 const DisplayOptionsScript := preload("res://scripts/input/display_options.gd")
 const BattleViewScript := preload("res://scenes/ui/battle_view.gd")
@@ -44,7 +45,7 @@ var _outcome: String = ""
 
 ## 隔离 View 须显式开启并在绑定前提供现有脚本节点；默认场景仍取得原节点。
 @onready var _view: Node2D = get_node_or_null("View")
-@onready var _display_options := get_node_or_null("/root/DisplayOptions") as DisplayOptionsScript
+@onready var _display_options := (get_node_or_null("/root/DisplayOptions") as DisplayOptionsScript) if is_inside_tree() else null
 var _skill_validation_view: bool = false
 var _skill_view_slot: String = "R"
 var _skill_input_notice: String = ""
@@ -56,6 +57,7 @@ var _skill_lifecycle_started: bool = false
 ## 仅存执行结果的独立数据；与 controller.last_input 的入队诊断分开。
 var last_cast_result: Dictionary = {}
 var _settings_open: bool = false
+var _accept_direction := true
 var _aim_key: String = ""
 var _aim_from_button: bool = false
 var _pointer: Vector2 = Vector2.ZERO
@@ -156,6 +158,8 @@ func _process(delta: float) -> void:
 		if not _skill_validation_current():
 			_close_skill_validation()
 			return
+		if _skill_validation_view:
+			controller.update_direction(_can_move_direction())
 		sim._advance_skill_schedule(delta, _skill_validation_speed)
 		if not _skill_validation_current():
 			_close_skill_validation()
@@ -168,6 +172,9 @@ func _process(delta: float) -> void:
 	while _accumulator >= _tick:
 		_accumulator -= _tick
 		_stepping = true
+		if controller.update_direction(_can_move_direction()) and not _aim_key.is_empty():
+			# 主动走位接管尚未提交的瞄准，松开技能键不会再发出旧指令。
+			_cancel_aim()
 		if bot != null:
 			bot.tick()
 		sim.step(_tick)
@@ -339,6 +346,17 @@ func _on_ended(result: String, reason: String, elapsed: float) -> void:
 			get_tree().quit(0)
 
 
+## 活动战场接收方向；暂停、设置、回程和自动战斗都不采纳手动方向。
+func _can_move_direction() -> bool:
+	return _accept_direction and sim != null and not sim.paused and not sim.finished and not _leaving and not _settings_open and bot == null
+
+
+## 场景正在接收方向时，阻止同一输入同时驱动界面焦点。
+func _input(event: InputEvent) -> void:
+	if _can_move_direction() and MovementInput.handles(event):
+		get_viewport().set_input_as_handled()
+
+
 ## 战斗先分流真人输入与隔离入口；重复按键不产生请求，真人瞄准可接收释放。
 func _unhandled_input(event: InputEvent) -> void:
 	if _skill_validation_mode and not _skill_validation_current():
@@ -362,6 +380,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("click_secondary"):
 		_on_click(_event_pos(event), true)
 	elif event.is_action_pressed("pause"):
+		controller.interrupt_direction()
 		controller.toggle_pause()
 	# 选人通知可同步离场；不能继续用已解绑控制器处理本事件的其他动作。
 	if _skill_validation_mode and not _skill_validation_current():
@@ -385,7 +404,7 @@ func _event_pos(event: InputEvent) -> Vector2:
 	return Vector2(-1.0, -1.0)
 
 
-## 点击先给界面：头像、技能按钮、面板空白处都不会传给战场。
+## 点击先交给界面；右键地面可穿过纯绘制的前景。
 func _on_click(pos: Vector2, secondary: bool) -> void:
 	if _skill_validation_mode and not _skill_validation_current():
 		return
@@ -394,11 +413,11 @@ func _on_click(pos: Vector2, secondary: bool) -> void:
 		return
 	# 战场点交控制器，View命中点单独转入其局部坐标；父子位移不能把面板点击漏给移动。
 	var hit_pos := _view.to_local(to_global(pos)) if _skill_validation_view else pos
-	var hit: Dictionary = _view.call("hit_test", hit_pos)
+	var hit: Dictionary = _view.call("hit_test", hit_pos, secondary)
 	_dispatch_click(hit, pos, secondary)
 
 
-## 分发真实点击；正式场普通命令入队前的拒绝也走已有提示，选人和右键空地不重放旧结果。
+## 将旧版和验证场的可见单位或地面命中交给对应的鼠标入口。
 func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 	if _leaving or sim == null or (_skill_validation_mode and not _skill_validation_current()):
 		return
@@ -410,18 +429,19 @@ func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 	if sim.player_controls:
 		_player_click(hit, pos, secondary)
 		return
-	if hit.is_empty():
+	if hit.is_empty() or hit.get("kind") == "world_target":
 		var previous_input := controller.last_input
+		var target_id := int(hit.get("id", -1))
 		if secondary:
-			controller.on_right_click(pos)
+			controller.on_right_click(pos, target_id)
 		else:
-			controller.on_left_click(pos)
+			controller.on_left_click(pos, target_id)
 		# 控制器每次入队尝试都会换结果字典；相同拒绝连续发生时仍要更新提示时间。
 		var latest_input := controller.last_input
 		if sim.formal_skill_sortie and not is_same(previous_input, latest_input) and not latest_input.get("queued", false):
 			var unit := controller.selected_unit()
 			if unit != null:
-				_on_rejected(unit.id, "target" if secondary else "move", String(latest_input["reason"]))
+				_on_rejected(unit.id, "target" if target_id >= 0 else "move", String(latest_input["reason"]))
 		return
 	if secondary:
 		return
@@ -432,7 +452,7 @@ func _dispatch_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 			_submit_skill(String(hit["key"]))
 
 
-## 实战输入先处理设置与瞄准；Esc 可撤回当前角色待执行的接近。
+## 实战优先处理设置和瞄准，暂停时结束持续输入，Esc 可以撤回待执行的接近。
 func _player_input(event: InputEvent) -> void:
 	if event is InputEventMouse:
 		_pointer = _event_pos(event)
@@ -451,6 +471,7 @@ func _player_input(event: InputEvent) -> void:
 		return
 	elif event.is_action_pressed("pause"):
 		_cancel_aim()
+		controller.interrupt_direction()
 		controller.toggle_pause()
 	elif event.is_action_pressed("battle_cycle_target"):
 		controller.cycle_target()
@@ -481,11 +502,12 @@ func _pointer_is_ground() -> bool:
 	return hit.is_empty() or hit.get("kind") == "world_target"
 
 
-## 按键和地面按钮共用同一个角色瞄准锁。
+## 进入待确认的技能瞄准时结束持续走位，并锁定当前角色。
 func _begin_aim(key: String, from_button: bool) -> void:
 	var actor := controller.selected_unit()
 	if actor == null or not actor.alive:
 		return
+	controller.interrupt_direction()
 	_aim_key = key
 	_aim_from_button = from_button
 	sim.set_ally_aim_actor(actor.id)
@@ -499,7 +521,7 @@ func _cancel_aim() -> void:
 		sim.set_ally_aim_actor(-1)
 
 
-## 将绘制命中化为选目标、移动、打开设置或一次技能确认，模态界面消费全部点击。
+## 按命中处理选目标、走位和技能确认，设置模态打开时清除持续输入。
 func _player_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 	_pointer = pos
 	var kind := String(hit.get("kind", ""))
@@ -519,6 +541,7 @@ func _player_click(hit: Dictionary, pos: Vector2, secondary: bool) -> void:
 		return
 	if not secondary and kind == "settings":
 		_cancel_aim()
+		controller.interrupt_direction()
 		sim.set_paused(true)
 		_settings_open = true
 		return
@@ -588,6 +611,12 @@ func _submit_skill(key: String) -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_ENTER_TREE:
 		_skill_lifecycle_started = true
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		_accept_direction = false
+		if controller != null:
+			controller.interrupt_direction()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		_accept_direction = true
 	if _skill_validation_mode:
 		if what == NOTIFICATION_EXIT_TREE or what == NOTIFICATION_PREDELETE:
 			_close_skill_validation()

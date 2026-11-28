@@ -95,7 +95,7 @@ func _text(pos: Vector2, text: String, size: int, color: Color, width: float = -
 	draw_string(_font, pos, text, align, width, size, color)
 
 
-## 先绘制地板和固定背景，再将队长插入落地物件之间；文字提示置顶。
+## 先绘制地板与按脚点排序的角色，再在上方显示交互名称及移动操作。
 func _draw() -> void:
 	if _background.is_empty():
 		return
@@ -130,7 +130,7 @@ func _draw() -> void:
 		_text(Vector2(24, 54), "点击公告板或下方「招募伙伴」，招募第一名队员后队长就会出现。", 22, Color("ffe5ac"))
 	else:
 		_text(Vector2(24, 54), "下一步：点「队伍整备」看装备和天赋，准备好后点「出征准备」。", 22, Color("ffe5ac"))
-		_text(Vector2(24, 90), "左键点地走路，点场景入口走近后打开面板。右键停步，Esc 关闭面板。", 20, Color.WHITE)
+		_text(Vector2(24, 90), "右键点地走路，方向键／左摇杆走位。左键点场景入口交互，Esc 关闭面板。", 20, Color.WHITE)
 	if _toast != "":
 		_text(Vector2(0, 972), _toast, 30, Color(1, 0.85, 0.5), 1920.0, HORIZONTAL_ALIGNMENT_CENTER)
 

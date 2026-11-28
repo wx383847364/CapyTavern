@@ -7,6 +7,7 @@ const MotionTrack := preload("res://scenes/ui/motion_track.gd")
 const TavernSim := preload("res://scripts/tavern/tavern_sim.gd")
 const TavernEvents := preload("res://scripts/tavern/tavern_events.gd")
 const TavernLayout := preload("res://scripts/data/tavern_layout.gd")
+const MovementInput := preload("res://scripts/input/movement_input.gd")
 const TavernController := preload("res://scripts/input/tavern_controller.gd")
 const ItemsTable := preload("res://scripts/data/items_table.gd")
 const SaveStore := preload("res://scripts/data/save_store.gd")
@@ -39,6 +40,7 @@ var _toast: String = ""
 var _toast_until_ms: int = 0
 var _class_colors: Dictionary = {}
 var _loading: bool = false
+var _accept_direction := true
 # 私有出征快照随确认生成，失败重试复用，公共 sortie_locked 的字段不变。
 var _formal_lock: Dictionary = {}
 var _formal_prepared: Dictionary = {}
@@ -114,15 +116,19 @@ func _exit_tree() -> void:
 
 ## 招募、换队长之后调用（P3b 的面板会用）：零成员无角色；第一人入队在出生点生成队长；
 ## 换队长只换形象，位置、朝向不变，也不发移动信号。
+## 队长身份变化时，持续方向输入须松手后重新开始。
 func refresh_party() -> void:
 	var slot := int(service.state["captainSlot"])
 	if slot < 0:
+		controller.movement.interrupt()
 		sim.remove_captain()
 		return
 	var class_id: String = (service.state["slots"] as Array)[slot]
 	if not sim.has_captain:
+		controller.movement.interrupt()
 		sim.spawn_captain(class_id, sim.spawn_pos())
 	elif sim.captain_class != class_id:
+		controller.movement.interrupt()
 		sim.swap_captain_class(class_id)
 
 
@@ -331,6 +337,7 @@ func _process(delta: float) -> void:
 		_accumulator -= TICK
 		var corners := PackedVector2Array()
 		_stepping = true
+		controller.update_direction(_can_move_direction())
 		sim.step(TICK, corners)
 		_stepping = false
 		if sim.has_captain and _motion != null and _motion.generation == sim.captain_generation:
@@ -340,12 +347,27 @@ func _process(delta: float) -> void:
 	_refresh_view()
 
 
+## 窗口失焦停止输入，恢复焦点时仍需重新按方向键或推杆。
 func _notification(what: int) -> void:
-	# 失去焦点：停步并取消待交互，回来后等新输入
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and controller != null:
+		_accept_direction = false
 		controller.on_focus_lost()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		_accept_direction = true
 
 
+## 只在可以移动的场景状态接收方向，打开面板时交给界面焦点处理。
+func _can_move_direction() -> bool:
+	return _accept_direction and sim != null and sim.has_captain and sim.panel.is_empty() and not _loading
+
+
+## 游戏场景接收方向时阻止同一个按键再触发界面方向导航。
+func _input(event: InputEvent) -> void:
+	if _can_move_direction() and MovementInput.handles(event):
+		get_viewport().set_input_as_handled()
+
+
+## 分发界面未消费的交互左键和走位右键。
 func _unhandled_input(event: InputEvent) -> void:
 	if sim == null:
 		return
@@ -362,8 +384,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("click_primary"):
 		_on_left_click(_event_pos(event))
 	elif event.is_action_pressed("click_secondary"):
-		# 右键只在场景可操作时生效，面板打开时由逻辑层拒绝，不穿透
-		_show_result(controller.on_right_click())
+		_show_result(controller.on_right_click(_event_pos(event)))
 
 
 ## 鼠标事件自带的位置换成场景坐标（不读全局鼠标位置，注入事件和失焦时也准）。
@@ -381,6 +402,7 @@ func _on_left_click(pos: Vector2) -> void:
 ## 记录面板请求和实际响应，正式阵容提示使用当前专精。
 func _on_open_requested(kind: String) -> void:
 	TavernEvents.diagnostic("ui_open_requested", {"kind": kind})
+	controller.movement.interrupt()
 	sim.open_panel(kind)
 	var specs := BattleConfig.formal_specs(service.battle_slots(), service.mage_spec()) if kind in ["prepare", "sortie"] else []
 	if specs.is_empty():

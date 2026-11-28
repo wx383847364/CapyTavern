@@ -9,7 +9,8 @@
   "cell": 10,
   "captain": {
     "speed": 220,
-    "radius": 22
+    "radius": 22,
+    "foot_radius": 8
   },
   "spawn": {
     "x": 1100,

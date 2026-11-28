@@ -1,33 +1,48 @@
 extends RefCounted
-## 酒馆输入控制器：把「已经没被界面接住」的点击、右键、Esc 翻译成逻辑层命令。
-## 界面优先级（场景加载遮罩 → 弹窗 → 功能面板 → 常驻栏 → 场景对象 → 地面）里，
-## 前面几层由场景脚本先处理；到这里只剩「对象 → 地面」两层。一次点击只做一件事。
-## 酒馆里数字键 1～4 和 Q/W/E/R 不执行任何战斗动作，这里也就没有对应入口。
+## 把酒馆的场景交互、点地移动和方向输入交给逻辑层，面板优先消费输入。
 
 const TavernSim := preload("res://scripts/tavern/tavern_sim.gd")
+const MovementInput := preload("res://scripts/input/movement_input.gd")
 
 var sim: TavernSim
+var movement := MovementInput.new()
 
 
+## 每次绑定时丢弃从上一场按住的方向。
 func setup(tavern_sim: TavernSim) -> void:
 	sim = tavern_sim
+	movement.interrupt()
 
 
-## 左键先尊重面板限制；命中队长可见本体或脚下范围时忽略，随后判断对象和地面。
+## 左键仅响应可点击物件；队长本体和普通地面不改变当前命令。
 func on_left_click(pos: Vector2, visible_captain_hit: Variant = null) -> Dictionary:
 	if sim.panel != "":
-		return sim.click_ground(pos)
+		return {"ok": false, "reason": "panel_open"}
 	var captain_hit := sim.captain_at(pos) if visible_captain_hit == null else bool(visible_captain_hit)
-	if captain_hit:
+	var object_id := "" if captain_hit else sim.object_at(pos)
+	if object_id.is_empty():
 		return {"ok": true, "reason": "", "ignored": true}
-	var object_id := sim.object_at(pos)
-	if object_id != "":
-		return sim.click_object(object_id)
-	return sim.click_ground(pos)
+	var result := sim.click_object(object_id)
+	if result.get("ok", false):
+		movement.interrupt()
+	return result
 
 
-func on_right_click() -> Dictionary:
-	return sim.right_click()
+## 右键只提交地面命令，失效落点不抢占当前移动。
+func on_right_click(pos: Vector2) -> Dictionary:
+	var result := sim.click_ground(pos)
+	if result.get("ok", false):
+		movement.interrupt()
+	return result
+
+
+## 将方向交给模拟步；面板、加载或无队长时等待重新输入。
+func update_direction(enabled: bool) -> void:
+	if enabled:
+		sim.set_move_direction(movement.poll())
+	else:
+		movement.interrupt()
+		sim.set_move_direction(Vector2.ZERO)
 
 
 ## Esc 一次只处理一层。
@@ -35,9 +50,12 @@ func on_escape() -> bool:
 	return sim.escape()
 
 
+## 失焦停止本次移动，直到按钮释放才能重新接管。
 func on_focus_lost() -> void:
+	movement.interrupt()
 	sim.focus_lost()
 
 
+## 悬停仅更新交互高亮。
 func on_hover(pos: Vector2) -> void:
 	sim.set_hover(pos)

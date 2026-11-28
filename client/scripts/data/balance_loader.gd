@@ -20,7 +20,7 @@ const EFFECT_PARAMS := {"damage": ["damage", "amount"], "heal": ["heal", "amount
 ##   sets     [class_id, ...] 已凑齐两件套的职业
 ##   dir      数值表目录（测试用）
 ##   modifiers false 时完全不套天赋和两件套（只给对照实验用）
-## 返回合并后的配置；读不到表返回空字典，并把原因写进 push_error。
+## 合并战斗数值与站位配置，旧布局缺少脚下半径时采用 8 像素。
 static func load_balance(options: Dictionary = {}) -> Dictionary:
 	var dir: String = String(options.get("dir", BALANCE_DIR))
 	var tables := {}
@@ -40,6 +40,7 @@ static func load_balance(options: Dictionary = {}) -> Dictionary:
 			config[key] = global[key]
 	for key in ["unit_radius", "arena", "ally_spawn", "attack_school"]:
 		config[key] = layout[key]
+	config["unit_foot_radius"] = layout.get("unit_foot_radius", 8.0)
 	config["classes"] = _strip_meta(tables["classes"])
 	config["enemies"] = _strip_meta(tables["enemies"])
 	config["skills"] = (tables["skills"]["skills"] as Dictionary).duplicate(true)

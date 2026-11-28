@@ -198,7 +198,7 @@ func _run() -> void:
 	await _click("panel_close")
 
 	print("── 示例三：改变途中目标 ──")
-	await _mouse(MOUSE_BUTTON_LEFT, Vector2(1100, 800))
+	await _mouse(MOUSE_BUTTON_RIGHT, Vector2(1100, 800))
 	await _wait_idle()
 	print("  起点 ", sim.captain_pos, " panel=", sim.panel)
 	_opened.clear()

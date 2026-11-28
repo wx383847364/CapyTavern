@@ -155,6 +155,7 @@ func clear_enemy_hits(all_effects: bool = false) -> void:
 
 
 ## 数字随受击或受疗目标浮起，目标离场时沿用命中位置，同目标数字左右错开。
+## 接收脚点和本体半径，计算飘字独立于地面碰撞的显示锚点。
 func show_combat_number(target_id: int, pos: Vector2, radius: float, amount: float, healing: bool, critical: bool) -> void:
 	var occupied := 0
 	for number in _combat_numbers:
@@ -166,7 +167,7 @@ func show_combat_number(target_id: int, pos: Vector2, radius: float, amount: flo
 	var text := "<1" if amount < 0.5 else skill_amount_text(amount)
 	if healing:
 		text = "+" + text
-	_combat_numbers.append({"target_id": target_id, "pos": pos, "offset": offset, "started": Time.get_ticks_msec(),
+	_combat_numbers.append({"target_id": target_id, "pos": pos - Vector2(0, radius), "offset": offset, "started": Time.get_ticks_msec(),
 		"text": text, "healing": healing, "critical": critical})
 	if _combat_numbers.size() > 32:
 		_combat_numbers.pop_front()
@@ -201,8 +202,8 @@ static func skill_amount_text(amount: float, decimal: bool = false) -> String:
 	return "%.1f" % rounded
 
 
-## HUD 及留白先消费点击，再检查可见标签和当前画在最前的可选本体。
-func hit_test(pos: Vector2) -> Dictionary:
+## HUD 优先于战场；前景遮住本体，但右键仍可命中前景下的合法地面。
+func hit_test(pos: Vector2, movement: bool = false) -> Dictionary:
 	if _snap.is_empty():
 		return {}
 	if bool(_snap["finished"]):
@@ -237,35 +238,36 @@ func hit_test(pos: Vector2) -> Dictionary:
 	var panel := _portrait_rect(0).merge(_portrait_rect(3)).grow(8.0)
 	if bar.has_point(pos) or panel.has_point(pos):
 		return {"kind": "hud"}
+	if not _hud.is_empty():
+		if SETTINGS_BUTTON.has_point(pos):
+			return {"kind": "settings"}
+		if OUTPUT_PANEL.has_point(pos) or THREAT_PANEL.has_point(pos):
+			return {"kind": "hud"}
+		var target: Dictionary = _by_id.get(_hud["target"], {})
+		if TARGET_BAR.has_point(pos):
+			return {"kind": "target", "id": target["id"]} if not target.is_empty() else {"kind": "hud"}
+		var other := _target_of(target)
+		if not other.is_empty() and TARGET_OF_TARGET_BAR.has_point(pos):
+			return {"kind": "target", "id": other["id"]}
+	var arena: Rect2 = _snap["arena"]
 	var front_point := pos - FOREGROUND_ORIGIN
 	if _foreground_mask != null and Rect2(Vector2.ZERO, MINE_FOREGROUND.get_size()).has_point(front_point):
 		if _foreground_mask.get_pixelv(Vector2i(front_point)).a >= 0.5:
-			return {"kind": "hud"}
-	if _hud.is_empty():
-		return {} if (_snap["arena"] as Rect2).has_point(pos) else {"kind": "hud"}
-	if SETTINGS_BUTTON.has_point(pos):
-		return {"kind": "settings"}
-	if OUTPUT_PANEL.has_point(pos) or THREAT_PANEL.has_point(pos):
-		return {"kind": "hud"}
-	var target: Dictionary = _by_id.get(_hud["target"], {})
-	if TARGET_BAR.has_point(pos):
-		return {"kind": "target", "id": target["id"]} if not target.is_empty() else {"kind": "hud"}
-	var other := _target_of(target)
-	if not other.is_empty() and TARGET_OF_TARGET_BAR.has_point(pos):
-		return {"kind": "target", "id": other["id"]}
-	for unit in _world_labels:
-		if _world_label_rect(unit).has_point(pos):
-			return {"kind": "world_target", "id": unit["id"]}
+			return {} if movement and arena.has_point(pos) else {"kind": "hud"}
+	if not _hud.is_empty():
+		for unit in _world_labels:
+			if _world_label_rect(unit).has_point(pos):
+				return {"kind": "world_target", "id": unit["id"]}
 	# 本体按绘制顺序反查；倒下的单位属于地面层，已排除。
 	for index in range(_live_units.size() - 1, -1, -1):
 		var unit := _live_units[index]
-		var offset: Vector2 = pos - unit["pos"]
+		var offset := pos - _body_center(unit)
 		var diamond: bool = unit["side"] == "enemy" and unit["kind"] == "caster"
 		var distance := absf(offset.x) + absf(offset.y) if diamond else offset.length()
 		if distance <= float(unit["radius"]):
 			return {"kind": "world_target", "id": unit["id"]}
 	# 岩壁、底部岩石外侧及其透明留白都在可走矩形之外。
-	return {} if (_snap["arena"] as Rect2).has_point(pos) else {"kind": "hud"}
+	return {} if arena.has_point(pos) else {"kind": "hud"}
 
 
 ## 按队伍槽位返回卡片矩形，绘制及命中共用同一位置。
@@ -351,7 +353,7 @@ func _draw_projectile_feedback(now: int) -> void:
 			draw_circle(impact["pos"], lerpf(5.0, 17.0, progress), Color(1.0, 0.8, 0.56, 0.65 * (1.0 - progress)), true, -1.0, true)
 
 
-## 飘字使用原来的显示计时和偏移，在本体及头顶信息之后绘制。
+## 飘字跟随可见本体，使用既有显示计时和偏移。
 func _draw_combat_numbers(now: int) -> void:
 	for number in _combat_numbers:
 		var age := float(now - int(number["started"]))
@@ -364,7 +366,7 @@ func _draw_combat_numbers(now: int) -> void:
 		if number["critical"]:
 			size = roundi(32.0 * lerpf(1.35, 1.0, clampf(age / 140.0, 0.0, 1.0)))
 		var target: Dictionary = _by_id.get(number["target_id"], {})
-		var anchor: Vector2 = target.get("pos", number["pos"])
+		var anchor: Vector2 = number["pos"] if target.is_empty() else _body_center(target)
 		var pos: Vector2 = anchor + number["offset"] + Vector2(-80.0, -56.0 * progress)
 		var text: String = number["text"]
 		draw_string_outline(_font, pos, text, HORIZONTAL_ALIGNMENT_CENTER, 160.0, size, 7, Color(0.06, 0.07, 0.10, ink.a))
@@ -401,7 +403,7 @@ func _draw_telegraphs(units: Array, outline_only: bool) -> void:
 			draw_circle(center, radius * progress, Color(0.9, 0.2, 0.2, 0.25))
 
 
-## 绘制走位路径，真人模式的目标指示在头像与头顶标记独立绘制。
+## 路线贴地绘制，单位目标环围绕可见本体。
 func _draw_orders(selected: Dictionary, by_id: Dictionary) -> void:
 	var pos: Vector2 = selected["pos"]
 	var order_kind: String = selected["order_kind"]
@@ -419,12 +421,17 @@ func _draw_orders(selected: Dictionary, by_id: Dictionary) -> void:
 		if bool(target["alive"]):
 			var color := Color("6fe08a") if selected["attack_kind"] == "heal" else Color("ffd54a")
 			draw_line(pos, target["pos"], Color(color.r, color.g, color.b, 0.7), 2.0)
-			draw_arc(target["pos"], float(target["radius"]) + 7.0, 0.0, TAU, 32, color, 2.0)
+			draw_arc(_body_center(target), float(target["radius"]) + 7.0, 0.0, TAU, 32, color, 2.0)
 
 
-## 绘制角色、命中反馈和状态；冻结和冰箱用冰蓝轮廓。
+## 本体从脚点向上展开，绘制、标签和鼠标命中使用同一个中心。
+func _body_center(unit: Dictionary) -> Vector2:
+	return (unit["pos"] as Vector2) - Vector2(0, float(unit["radius"]))
+
+
+## 从脚点绘制本体、命中反馈和冰冻状态。
 func _draw_unit(unit: Dictionary, is_selected: bool, now: int) -> void:
-	var pos: Vector2 = unit["pos"]
+	var pos := _body_center(unit)
 	var radius: float = unit["radius"]
 	var alive: bool = unit["alive"]
 	var color := Color.html(String(unit["color"]))
@@ -471,9 +478,9 @@ func _draw_unit(unit: Dictionary, is_selected: bool, now: int) -> void:
 		status_x += 14.0
 
 
-## 旧版标签保留血条、读条和名称，法力单位在血条下方补一条细蓝条。
+## 旧版标签从本体中心定位血条、读条和名称。
 func _draw_legacy_world_label(unit: Dictionary) -> void:
-	var pos: Vector2 = unit["pos"]
+	var pos := _body_center(unit)
 	var radius: float = unit["radius"]
 	var enemy: bool = unit["side"] == "enemy"
 	var bar_w := maxf(54.0, radius * 2.4)
@@ -594,7 +601,7 @@ func _full_skill_cost_text(view: Dictionary) -> String:
 	return "%s %s米 / 耗%s法力" % [target, reach, mana]
 
 
-## 顶部居中留出目标条、计时和操作提示，暂停提示仍覆盖战场中央。
+## 顶部保留计时与移动操作说明，暂停提示覆盖战场中央。
 func _draw_top() -> void:
 	var left := maxf(0.0, float(_snap["limit"]) - float(_snap["time"]))
 	var minutes := int(left) / 60
@@ -602,11 +609,11 @@ func _draw_top() -> void:
 	var timer := Rect2(846, 104, 228, 45)
 	_draw_panel(timer)
 	_text(timer.position + Vector2(0, 32), "剩余 %d:%02d" % [minutes, seconds], 29, Color("ffe9bd"), timer.size.x, HORIZONTAL_ALIGNMENT_CENTER)
-	var guide := "1–4 换人　左键选择／移动　右键攻击／普疗　Q/W/E/R 技能　P 暂停"
+	var guide := "1–4 换人　左键选人　右键走位／攻击／普疗　方向键／左摇杆　QWER 技能　P 暂停"
 	if not _hud.is_empty():
-		guide = "1–4 换人　左键选目标　右键走位／攻击／普疗　Tab 切敌　Q/W/E/R 技能　P 暂停"
+		guide = "1–4 换人　左键选目标　右键走位／攻击／普疗　方向键／左摇杆　Tab 切敌　QWER 技能　P 暂停"
 	elif _snap.get("skill_validation", false):
-		guide = "技能验证：右键设目标，Q/W/E/R 选技能"
+		guide = "技能验证 · 右键走位／设目标　方向键／左摇杆移动　Q/W/E/R 选技能"
 	var guide_rect := Rect2(519, 196, 827, 34)
 	_draw_panel(guide_rect)
 	_text(guide_rect.position + Vector2(12, 23), guide, 16, Color("ffecda"), guide_rect.size.x - 24, HORIZONTAL_ALIGNMENT_CENTER)
@@ -668,11 +675,11 @@ func _update_world_labels() -> void:
 				_world_labels.append(unit)
 
 
-## 避让区域包含读条、目标箭头和细蓝条，点击仍使用血条与身份区域。
+## 标签按本体中心定位，避让区域同时包含读条、目标箭头和细蓝条。
 func _world_label_bounds(unit: Dictionary, controlled_id: int, target_id: int) -> Array[Rect2]:
 	var casting := not (unit["cast"] as Dictionary).is_empty()
 	if _hud.is_empty():
-		var pos: Vector2 = unit["pos"]
+		var pos := _body_center(unit)
 		var radius: float = unit["radius"]
 		var width := maxf(54.0, radius * 2.4)
 		var top := pos.y - radius - (47.0 if casting else 16.0)
@@ -690,12 +697,12 @@ func _world_label_bounds(unit: Dictionary, controlled_id: int, target_id: int) -
 	return [_world_label_rect(unit).grow_side(SIDE_TOP, top_margin)]
 
 
-## 血条和右端身份标识使用同一个命中矩形。
+## 血条和身份标识共用跟随本体的命中矩形。
 func _world_label_rect(unit: Dictionary) -> Rect2:
 	var radius: float = unit["radius"]
 	var bar_width := maxf(64.0, radius * 2.4)
 	var badge := 78.0 if _hud.get("prefs", {}).get("names", false) else 26.0
-	var pos: Vector2 = unit["pos"]
+	var pos := _body_center(unit)
 	return Rect2(pos + Vector2(-bar_width * 0.5, -radius - 36.0), Vector2(bar_width + badge, 24.0))
 
 

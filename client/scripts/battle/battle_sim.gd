@@ -22,6 +22,7 @@ class Unit:
 	var display_name: String = ""
 	var color_hex: String = "ffffff"
 	var radius: float = 22.0
+	var foot_radius: float = 8.0
 	var max_hp: float = 1.0
 	var hp: float = 1.0
 	var pos: Vector2 = Vector2.ZERO
@@ -37,6 +38,7 @@ class Unit:
 	# 命令
 	var order_kind: String = "none"
 	var order_pos: Vector2 = Vector2.ZERO
+	var move_direction := Vector2.ZERO
 	## 玩家选中的施法目标、持续指令对象与已计入统计的扣血分别记录。
 	var target_id: int = -1
 	var selected_target_id: int = -1
@@ -238,6 +240,7 @@ func _new_unit() -> Unit:
 
 
 ## 出生按配表取整数基础生命，并按本场锁定的专精选技能和普攻。
+## 从场景配置分别初始化显示半径与脚下占地，出生坐标沿用站位表。
 func _spawn_ally(slot_index: int, class_id: String, publish: bool = true) -> void:
 	var cls: Dictionary = config["classes"][class_id]
 	var spawn: Dictionary = config["ally_spawn"]
@@ -248,6 +251,7 @@ func _spawn_ally(slot_index: int, class_id: String, publish: bool = true) -> voi
 	unit.display_name = String(cls["name"])
 	unit.color_hex = String(cls["color"])
 	unit.radius = float(config.get("unit_radius", 22.0))
+	unit.foot_radius = float(config.get("unit_foot_radius", 8.0))
 	unit.max_hp = int(cls["max_hp"])
 	unit.hp = unit.max_hp
 	unit.pos = Vector2(float(spawn["x"]), float(spawn["y0"]) + float(spawn["dy"]) * slot_index)
@@ -283,7 +287,7 @@ func _spawn_ally(slot_index: int, class_id: String, publish: bool = true) -> voi
 		events.fire(&"unit_spawned", [unit.id, "ally", slot_index, class_id, int(unit.max_hp), unit.pos])
 
 
-## 旧敌方缩放保留原整数取整；出生事件继续提供整数生命。
+## 敌方脚下占地随体型缩放；生命与伤害沿用既有缩放。
 func _spawn_enemy(entry: Dictionary, hp_scale: float, dmg_scale: float, publish: bool = true) -> void:
 	var enemy_id: String = entry["enemy"]
 	var def: Dictionary = config["enemies"][enemy_id]
@@ -293,6 +297,7 @@ func _spawn_enemy(entry: Dictionary, hp_scale: float, dmg_scale: float, publish:
 	unit.display_name = String(def["name"])
 	unit.color_hex = String(def["color"])
 	unit.radius = float(def["radius"])
+	unit.foot_radius = unit.radius * float(config.get("unit_foot_radius", 8.0)) / 22.0
 	unit.max_hp = maxi(1, roundi(float(def["max_hp"]) * hp_scale))
 	unit.hp = unit.max_hp
 	unit.pos = Vector2(float(entry["x"]), float(entry["y"]))
@@ -330,6 +335,7 @@ func living(side: String) -> Array[Unit]:
 	return result_list
 
 
+## 无画面输入用脚点上方的本体中心命中，脚下半径只用于移动。
 func unit_at(pos: Vector2, side: String, slack: float = 8.0) -> Unit:
 	var best: Unit = null
 	var best_dist := INF
@@ -339,7 +345,7 @@ func unit_at(pos: Vector2, side: String, slack: float = 8.0) -> Unit:
 			continue
 		if side == "enemy" and not unit.alive:
 			continue
-		var dist := unit.pos.distance_to(pos)
+		var dist := (unit.pos - Vector2(0, unit.radius)).distance_to(pos)
 		if dist <= unit.radius + slack and dist < best_dist:
 			best = unit
 			best_dist = dist
@@ -410,21 +416,67 @@ func _gate(unit_id: int, kind: String) -> Unit:
 	return unit
 
 
-## 真人右键走位接管自动接近和读条，随后保存新的移动目的地。
+## 右键走位接管旧命令，目的地按脚下占地裁到场内。
 func order_move(unit_id: int, pos: Vector2) -> bool:
+	if not pos.is_finite():
+		return false
 	var unit := _gate(unit_id, "move")
 	if unit == null:
 		return false
+	unit.order_pos = _clamp_feet(unit, pos)
+	_take_move_control(unit, "move")
+	events.fire(&"command_issued", [unit_id, "move", -1, unit.order_pos])
+	return true
+
+
+## 持续走位只在启动时接管旧命令；回中不会取消较新的点地或追击。
+func order_direction(unit_id: int, direction: Vector2) -> bool:
+	if not direction.is_finite():
+		return false
+	if direction.is_zero_approx():
+		var current: Unit = units.get(unit_id)
+		if current != null and current.order_kind == "direction":
+			current.order_kind = "none"
+			current.move_direction = Vector2.ZERO
+		return true
+	var unit := _gate(unit_id, "move")
+	if unit == null or not unit.controllable or unit.statuses.has("frozen"):
+		return false
+	unit.move_direction = direction.limit_length()
+	if unit.order_kind != "direction":
+		_take_move_control(unit, "direction")
+		events.fire(&"command_issued", [unit_id, "move", -1, unit.pos])
+	return true
+
+
+## 清除活跃或已排队的持续方向。换控制角色和暂停时不再接受此前按住的方向。
+func clear_direction(unit_id: int = -1) -> void:
+	for id in _ids:
+		if unit_id < 0 or id == unit_id:
+			order_direction(id, Vector2.ZERO)
+	for index in range(_skill_pending.size() - 1, -1, -1):
+		var command := _skill_pending[index]
+		if command["kind"] == "direction" and (unit_id < 0 or command["payload"]["caster_id"] == unit_id):
+			_skill_pending.remove_at(index)
+
+
+## 方向已经入队时，控制器等到执行点再判断是否被其他命令接管。
+func direction_pending(unit_id: int) -> bool:
+	for command: Dictionary in _skill_pending:
+		if command["kind"] == "direction" and command["payload"]["caster_id"] == unit_id:
+			return true
+	return false
+
+
+## 两种移动共享对旧指令、接近和读条的接管规则。
+func _take_move_control(unit: Unit, kind: String) -> void:
 	_cancel_cast_approach(unit)
-	unit.order_kind = "move"
-	unit.order_pos = Vector2(clampf(pos.x, _arena.position.x + unit.radius, _arena.end.x - unit.radius), clampf(pos.y, _arena.position.y + unit.radius, _arena.end.y - unit.radius))
+	unit.order_kind = kind
 	unit.target_id = -1
 	if controlled_actor_id >= 0:
 		unit.manual_target_id = -1
 		unit.auto_target_id = -1
 		_cancel_player_cast(unit, "CAST_INTERRUPTED")
-	events.fire(&"command_issued", [unit_id, "move", -1, unit.order_pos])
-	return true
 
 
 ## 右键点敌人。不能攻击的职业（牧师）和无效目标不改变当前命令，也不发事件。
@@ -598,6 +650,8 @@ func _damage_threat(actor: Unit, damage: float, skill_id: String) -> float:
 
 ## 切换控制权时只继承玩家指令，AI 临时选择不会成为手动攻击目标。
 func set_controlled_actor(actor_id: int) -> void:
+	if controlled_actor_id >= 0 and controlled_actor_id != actor_id:
+		clear_direction(controlled_actor_id)
 	controlled_actor_id = actor_id
 	var actor: Unit = units.get(actor_id)
 	if actor != null:
@@ -605,13 +659,16 @@ func set_controlled_actor(actor_id: int) -> void:
 		actor.target_id = -1
 
 
-## 当前角色执行显式右键指令，其他角色按现有 AI 和兼容规则推进。
+## 当前角色执行手动走位或持续战斗指令，其他角色按既有 AI 推进。
 func _tick_player_ally(actor: Unit, dt: float) -> void:
 	if not actor.cast.is_empty():
 		return
 	if actor.id == controlled_actor_id:
 		_set_ai_evading(actor, false)
 		actor.target_id = -1
+		if actor.order_kind == "direction":
+			_move_in_direction(actor, dt)
+			return
 		if actor.order_kind == "move":
 			if _move_toward(actor, actor.order_pos, dt, 3.0):
 				actor.order_kind = "none"
@@ -761,7 +818,7 @@ func _tick_ally_ai(actor: Unit, dt: float) -> void:
 	var in_danger := AllyAI.path_enters(actor.pos, actor.pos, circles)
 	_set_ai_evading(actor, in_danger)
 	if in_danger:
-		var escape := AllyAI.escape_point(actor.pos, _arena.grow(-actor.radius), circles)
+		var escape := AllyAI.escape_point(actor.pos, _foot_bounds(actor), circles)
 		if escape != actor.pos:
 			_move_toward(actor, escape, dt, 0.0)
 		return
@@ -802,7 +859,7 @@ func _set_ai_evading(actor: Unit, active: bool) -> void:
 		events.fire(&"ai_evade", [actor.id, active])
 
 
-## 按本步移动路径预判红圈，返回是否允许尝试移动，供施法接近区分挡路和卡住。
+## 按脚点的实际裁剪路径预判红圈，供 AI 与施法接近判断能否走位。
 func _move_ally_safely(actor: Unit, target: Unit, reach: float, dt: float, circles: Array[Vector3]) -> bool:
 	var distance := actor.pos.distance_to(target.pos)
 	if distance <= reach:
@@ -810,7 +867,7 @@ func _move_ally_safely(actor: Unit, target: Unit, reach: float, dt: float, circl
 	# 留少量入圈余量，避免分离推动后马上卡在射程边线。
 	var stop := reach * 0.96
 	var next := actor.pos.move_toward(target.pos, minf(actor.speed * dt, distance - stop))
-	var safe_arena := _arena.grow(-actor.radius)
+	var safe_arena := _foot_bounds(actor)
 	var clamped := next.clamp(safe_arena.position, safe_arena.end)
 	if AllyAI.path_enters(actor.pos, clamped, circles):
 		return false
@@ -818,11 +875,12 @@ func _move_ally_safely(actor: Unit, target: Unit, reach: float, dt: float, circl
 	return true
 
 
-## 真人暂停保留已接收命令，冻结步进；隔离调度沿用清队列的验证规则。
+## 暂停冻结步进并释放持续方向，既有鼠标命令和隔离队列规则保留。
 func set_paused(value: bool) -> void:
 	if not finished:
 		paused = value
 		if value:
+			clear_direction()
 			_ai_manual_cast.clear()
 			_ai_aim_actor = -1
 		if value and _skill_schedule_active:
@@ -905,13 +963,13 @@ func _frost_nova_targets(caster: Unit, radius: float) -> Array[Unit]:
 	return targets
 
 
-## 沿鼠标射线裁到场内；若终点重叠，从最远处退到重叠区的近边界。
+## 按脚下占地裁剪闪现终点；终点重叠时沿射线退到可落脚位置。
 func blink_landing(caster: Unit, pointer: Vector2, reach: float) -> Vector2:
 	var delta := pointer - caster.pos
 	if not delta.is_finite() or delta.length_squared() < 0.000001:
 		return Vector2.INF
 	var direction := delta.normalized()
-	var bounds := _arena.grow(-caster.radius)
+	var bounds := _foot_bounds(caster)
 	var distance := reach
 	for axis in 2:
 		if absf(direction[axis]) > 0.000001:
@@ -925,7 +983,7 @@ func blink_landing(caster: Unit, pointer: Vector2, reach: float) -> Vector2:
 			continue
 		var offset := other.pos - caster.pos
 		var projection := offset.dot(direction)
-		var clearance := caster.radius + other.radius
+		var clearance := caster.foot_radius + other.foot_radius
 		var chord_squared := clearance * clearance - (offset - direction * projection).length_squared()
 		if chord_squared > 0.0:
 			var chord := sqrt(chord_squared)
@@ -1526,7 +1584,7 @@ func _regen(unit: Unit, dt: float) -> void:
 		events.fire(&"resource_changed", [unit.id, unit.res_kind, value, int(unit.res_max)])
 
 
-## 手动施法接近优先于队友 AI 和普通持续指令，切换控制权不影响执行。
+## 手动施法接近优先，玩家方向走位也可在旧版战斗固定步推进。
 func _tick_ally(unit: Unit, dt: float) -> void:
 	if unit.statuses.has("ice_block"):
 		return
@@ -1539,6 +1597,8 @@ func _tick_ally(unit: Unit, dt: float) -> void:
 	if unit.spec_id == BattleConfig.MAGE_FROST and not unit.cast.is_empty():
 		return
 	match unit.order_kind:
+		"direction":
+			_move_in_direction(unit, dt)
 		"move":
 			if _move_toward(unit, unit.order_pos, dt, 3.0):
 				unit.order_kind = "none"
@@ -1594,15 +1654,33 @@ func _try_attack(unit: Unit, target: Unit) -> void:
 			_change_resource(unit, unit.res_on_attack)
 
 
+## 逐步走向目标，场地只限制脚点占地。
 func _move_toward(unit: Unit, dest: Vector2, dt: float, stop_dist: float) -> bool:
 	var delta := dest - unit.pos
 	var dist := delta.length()
 	if dist <= stop_dist:
 		return true
 	var travel := minf(unit.speed * dt, dist - stop_dist)
-	unit.pos += delta / dist * travel
-	unit.pos = Vector2(clampf(unit.pos.x, _arena.position.x + unit.radius, _arena.end.x - unit.radius), clampf(unit.pos.y, _arena.position.y + unit.radius, _arena.end.y - unit.radius))
+	unit.pos = _clamp_feet(unit, unit.pos + delta / dist * travel)
 	return dist - travel <= stop_dist + 0.001
+
+
+## 持续输入只推进本步位移，摇杆幅度直接参与速度。
+func _move_in_direction(unit: Unit, dt: float) -> void:
+	if not unit.controllable or unit.statuses.has("frozen") or unit.statuses.has("ice_block"):
+		return
+	unit.pos = _clamp_feet(unit, unit.pos + unit.move_direction * unit.speed * dt)
+
+
+## 所有移动和分离共享同一个脚点边界。
+func _foot_bounds(unit: Unit) -> Rect2:
+	return _arena.grow(-unit.foot_radius)
+
+
+## 限制脚点中心，显示和战斗命中半径不参与裁剪。
+func _clamp_feet(unit: Unit, pos: Vector2) -> Vector2:
+	var bounds := _foot_bounds(unit)
+	return pos.clamp(bounds.position, bounds.end)
 
 
 ## 嘲讽优先，真人场只有挑战者严格越过门槛才换下仍有效的目标。
@@ -1695,18 +1773,18 @@ func _resolve_cast(unit: Unit) -> void:
 			_damage(unit, target, damage, skill_id, false, school)
 
 
-## 冻结或冰箱期间角色保持原位，只有可移动的碰撞对象退让。
+## 场内单位按脚下占地分离，冻结对象保持原位，退让不越过边界。
 func _separate() -> void:
 	var alive_units: Array[Unit] = []
 	for id in _ids:
 		var unit: Unit = units[id]
-		if unit.alive:
+		if unit.alive and _arena.has_point(unit.pos):
 			alive_units.append(unit)
 	for i in alive_units.size():
 		for j in range(i + 1, alive_units.size()):
 			var a := alive_units[i]
 			var b := alive_units[j]
-			var min_dist := (a.radius + b.radius) * 0.85
+			var min_dist := a.foot_radius + b.foot_radius
 			var delta := b.pos - a.pos
 			var dist := delta.length()
 			if dist >= min_dist:
@@ -1717,9 +1795,9 @@ func _separate() -> void:
 			if a_fixed and b_fixed:
 				continue
 			if not a_fixed:
-				a.pos -= push * (min_dist - dist) * (1.0 if b_fixed else 0.5)
+				a.pos = _clamp_feet(a, a.pos - push * (min_dist - dist) * (1.0 if b_fixed else 0.5))
 			if not b_fixed:
-				b.pos += push * (min_dist - dist) * (1.0 if a_fixed else 0.5)
+				b.pos = _clamp_feet(b, b.pos + push * (min_dist - dist) * (1.0 if a_fixed else 0.5))
 
 
 func _check_end() -> void:
@@ -2086,9 +2164,9 @@ func _leave_skill_schedule() -> void:
 	_skill_accumulator = 0.0
 
 
-## 校验正式输入的角色、目标或落点，取消施法命令只携带角色身份。
+## 校验队列中的角色、地面目标或连续方向，拒绝非有限的坐标或向量。
 func _skill_command_shape_valid(kind: Variant, payload: Variant) -> bool:
-	if not kind is String or kind not in ["move", "target", "prepare", "cast", "cancel_cast"] or not payload is Dictionary:
+	if not kind is String or kind not in ["move", "direction", "target", "prepare", "cast", "cancel_cast"] or not payload is Dictionary:
 		return false
 	if not payload.get("battle_id") is String or not payload.get("caster_id") is int:
 		return false
@@ -2106,6 +2184,8 @@ func _skill_command_shape_valid(kind: Variant, payload: Variant) -> bool:
 			return aim.get("target") is int or (payload["expected_skill_id"] in ["mage.fire.flame_burst", "mage.frost.blink"] and point is Vector2 and point.is_finite())
 		"move":
 			return payload.size() == 3 and payload.get("pos") is Vector2 and payload["pos"].is_finite()
+		"direction":
+			return payload.size() == 3 and payload.get("direction") is Vector2 and payload["direction"].is_finite()
 		"target":
 			return payload.size() == 3 and payload.get("target_id") is int
 	return false
@@ -2202,8 +2282,11 @@ func _skill_periodic_point(battle_id: String, queue_epoch: int) -> void:
 			continue
 		if _skill_full_numeric:
 			# 只复用移动原语，不借_tick_ally带入自动选敌/普攻；目标命令仍只选目标。
-			if unit.side == "ally" and unit.order_kind == "move" and _move_toward(unit, unit.order_pos, SKILL_FIXED_STEP, 3.0):
-				unit.order_kind = "none"
+			if unit.side == "ally":
+				if unit.order_kind == "direction":
+					_move_in_direction(unit, SKILL_FIXED_STEP)
+				elif unit.order_kind == "move" and _move_toward(unit, unit.order_pos, SKILL_FIXED_STEP, 3.0):
+					unit.order_kind = "none"
 			continue
 		if unit.side == "ally":
 			_tick_ally(unit, SKILL_FIXED_STEP)
@@ -2215,7 +2298,7 @@ func _skill_periodic_point(battle_id: String, queue_epoch: int) -> void:
 	_check_end()
 
 
-## 按接收顺序处理输入；正式真人可登记接近，进射程后复用此执行入口。
+## 按接收顺序处理技能、目标与两种移动，正式真人的超距技能可登记接近。
 func _execute_skill_command(command: Dictionary) -> Dictionary:
 	var payload: Dictionary = command["payload"]
 	if not _skill_transaction_pending.is_empty():
@@ -2274,7 +2357,8 @@ func _execute_skill_command(command: Dictionary) -> Dictionary:
 			unit.target_id = target.id
 	else:
 		# 复用旧移动的场内裁剪与通知；同步回调只能向下一固定点入队。
-		if not order_move(unit.id, payload["pos"]):
+		var applied := order_direction(unit.id, payload["direction"]) if command["kind"] == "direction" else order_move(unit.id, payload["pos"])
+		if not applied:
 			issue = "INPUT_LOCKED"
 	return {"receive_seq": command["receive_seq"], "kind": command["kind"], "applied": issue.is_empty(), "reason": issue}
 
@@ -2322,7 +2406,7 @@ func _start_cast_approach(caster: Unit, skill: Dictionary, target_id: int, key: 
 		"command": command, "stalled": 0.0, "previous_pos": Vector2.INF}
 
 
-## 逐步接近锁定目标。避让先于施法，真正进射程后先消费命令再调用原结算。
+## 逐步接近锁定目标，从脚点计算场内避让；进射程后执行原结算。
 func _tick_cast_approach(caster: Unit, dt: float) -> void:
 	var approach := caster.cast_approach
 	var target: Unit = units.get(approach["target_id"])
@@ -2331,7 +2415,7 @@ func _tick_cast_approach(caster: Unit, dt: float) -> void:
 		return
 	var circles := AllyAI.hazards_for(caster, living("enemy"))
 	if AllyAI.path_enters(caster.pos, caster.pos, circles):
-		var escape := AllyAI.escape_point(caster.pos, _arena.grow(-caster.radius), circles)
+		var escape := AllyAI.escape_point(caster.pos, _foot_bounds(caster), circles)
 		_move_toward(caster, escape, dt, 0.0)
 		approach["stalled"] = 0.0
 		approach["previous_pos"] = Vector2.INF

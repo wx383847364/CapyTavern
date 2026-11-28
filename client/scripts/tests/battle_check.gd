@@ -70,12 +70,13 @@ func _initialize() -> void:
 	_s1b4_tree_cases.call_deferred()
 
 
-## 执行既有机制回归，并覆盖正式、混编的寒霜和手动超距接近。
+## 执行战斗机制回归，覆盖共用方向输入、寒霜和手动超距接近。
 func _run_all() -> void:
 	_full_battles()
 	_invalid_skills()
 	_selection_rules()
 	_command_rules()
+	_direction_cases()
 	_interrupt_and_status()
 	_determinism()
 	_player_control_cases()
@@ -415,6 +416,78 @@ func _ally_ai_support_cases() -> void:
 	for step in 20:
 		sim.step(0.05)
 	_check("AI 震地结束后恢复原攻击", tank.pos.distance_to(target.pos) <= tank.attack_range and tank.damage_done > 0.0)
+
+
+## 混编和正式战斗都用真实控制器提交方向，再检查持续移动的接管和释放。
+func _direction_cases() -> void:
+	for formal: bool in [false, true]:
+		var slots := ["mage", "priest", "", ""]
+		var sim := BattleSim.new()
+		var bus := BattleEvents.new()
+		var cfg := BattleConfig.load_config()
+		if formal:
+			var locked := {"slots": slots, "specs": BattleConfig.formal_specs(slots), "sets": []}
+			var issues := sim.prepare_formal_sortie(cfg, locked, 42, bus, BattleConfig.load_skill_catalog())
+			_check("方向输入的正式战斗预检", issues.is_empty(), str(issues))
+			if not issues.is_empty():
+				continue
+		else:
+			sim.setup(cfg, slots, 42, bus)
+		sim.player_controls = true
+		var controller := BattleController.new()
+		controller.setup(sim, bus, 0)
+		var actor := sim.slot_unit(0)
+		sim.set_controlled_actor(actor.id)
+		var tag := "正式战斗 " if formal else "混编战斗 "
+		var start := actor.pos
+		Input.action_press("move_stick_right", 0.1)
+		controller.update_direction(true)
+		sim.step(0.05)
+		_check(tag + "摇杆死区不产生移动", actor.pos == start)
+		Input.action_press("move_stick_right", 0.6)
+		controller.update_direction(true)
+		sim.step(0.05)
+		_check(tag + "摇杆提供半速持续位移", actor.order_kind == "direction"
+			and absf(actor.pos.x - start.x - actor.speed * 0.025) < 0.001)
+		Input.action_press("move_key_down")
+		var before := actor.pos
+		controller.update_direction(true)
+		sim.step(0.05)
+		_check(tag + "方向键优先于左摇杆", absf(actor.pos.y - before.y - actor.speed * 0.05) < 0.001 and actor.pos.x == before.x)
+		var bounds := sim._arena
+		controller.player_right_click(Vector2(bounds.end.x + 30, actor.pos.y))
+		controller.update_direction(true)
+		sim.step(0.05)
+		_check(tag + "右键接管且按脚下半径裁剪", actor.order_kind == "move"
+			and is_equal_approx(actor.order_pos.x, bounds.end.x - 8.0) and actor.radius > actor.foot_radius)
+		Input.action_release("move_key_down")
+		Input.action_release("move_stick_right")
+		controller.update_direction(true)
+		_check(tag + "松开旧方向不会取消新鼠标路线", actor.order_kind == "move")
+		Input.action_press("move_key_left")
+		controller.update_direction(true)
+		sim.step(0.05)
+		controller.select_slot(1)
+		var old := actor.pos
+		var next := sim.slot_unit(1)
+		var next_pos := next.pos
+		controller.update_direction(true)
+		sim.step(0.05)
+		_check(tag + "切人停止旧方向，新角色等按键释放", actor.pos == old and next.pos == next_pos)
+		Input.action_release("move_key_left")
+		controller.update_direction(true)
+		Input.action_press("move_key_up")
+		controller.update_direction(true)
+		sim.step(0.05)
+		sim.set_paused(true)
+		controller.update_direction(false)
+		var paused := next.pos
+		sim.set_paused(false)
+		controller.update_direction(true)
+		sim.step(0.05)
+		_check(tag + "暂停恢复不复用按住的方向", next.pos == paused and next.order_kind == "none")
+		Input.action_release("move_key_up")
+		controller.update_direction(true)
 
 
 ## 同一模拟器验证显式普攻、治疗支援、选目标循环与战士仇恨。
@@ -768,11 +841,13 @@ func _frost_cases() -> void:
 		sim._resolve_cast(boss)
 		_check(label + "震地按闪现后的落点判定", mage.hp == before_quake)
 		mage.pos = Vector2(1600, 500)
-		melee.pos = Vector2(1898, 500)
-		_check(label + "E 贴边可找最远点，终点被占则沿射线回退",
-			sim.blink_landing(mage, Vector2(1900, 500), 600.0).is_equal_approx(Vector2(1854, 500)))
+		var edge := sim._arena.end.x - mage.foot_radius
+		melee.pos = Vector2(edge, 500)
+		var clear_landing := Vector2(edge - mage.foot_radius - melee.foot_radius, 500)
+		_check(label + "E 终点脚下占地重叠则沿射线回退",
+			sim.blink_landing(mage, Vector2(1900, 500), 600.0).is_equal_approx(clear_landing))
 		melee.pos = Vector2(1600, 820)
-		_check(label + "E 终点空闲时停在边界内", sim.blink_landing(mage, Vector2(1900, 500), 600.0).is_equal_approx(Vector2(1898, 500)))
+		_check(label + "E 终点空闲时只留脚下半径", sim.blink_landing(mage, Vector2(1900, 500), 600.0).is_equal_approx(Vector2(edge, 500)))
 
 		# 将冰箱与仍有仇恨的 Boss 放在同一交战，精确检查每一跳和解冻伤害。
 		mage.hp = 100.0
@@ -1265,6 +1340,7 @@ func _invalid_skills() -> void:
 	cast_sim.set_paused(false)
 
 
+## 验证左键选择与右键走位分离，空地左键不改变指令。
 func _selection_rules() -> void:
 	var battle := _make(["warrior", "", "rogue", ""], 4)
 	var controller: BattleController = battle["controller"]
@@ -1283,11 +1359,14 @@ func _selection_rules() -> void:
 	controller.on_left_click(warrior.pos)
 	_check("左键点己方只选人，不发移动命令", controller.selected_slot == 0 and warrior.order_kind == "none" and _count(events, "command_issued") == 0)
 	controller.on_left_click(Vector2(700, 500))
-	_check("左键点地：选中者移动", warrior.order_kind == "move" and _count(events, "command_issued", {"kind": "move", "unit_id": warrior.id}) == 1)
+	_check("左键点地：维持当前命令", warrior.order_kind == "none" and _count(events, "command_issued") == 0)
+	controller.on_right_click(Vector2(700, 500))
+	_check("右键点地：选中者移动", warrior.order_kind == "move" and _count(events, "command_issued", {"kind": "move", "unit_id": warrior.id}) == 1)
 	var rogue := sim.slot_unit(2)
 	_check("移动命令不影响别人（盗贼没有命令）", rogue.order_kind == "none")
 
 
+## 验证右键按地面和阵营分流走位、普攻与普疗。
 func _command_rules() -> void:
 	var battle := _make(["warrior", "", "", "priest"], 6)
 	var sim: BattleSim = battle["sim"]
@@ -1301,7 +1380,7 @@ func _command_rules() -> void:
 	controller.on_right_click(priest.pos)
 	_check("非牧师右键点队友：不改当前命令", warrior.order_kind == "attack" and warrior.target_id == enemy.id)
 	controller.on_right_click(Vector2(900, 900))
-	_check("右键空地：不改当前命令", warrior.order_kind == "attack")
+	_check("右键空地：以走位接管普攻", warrior.order_kind == "move" and warrior.target_id == -1)
 	controller.select_slot(3)
 	controller.on_right_click(warrior.pos)
 	_check("牧师右键点队友：进入治疗命令", priest.order_kind == "heal" and priest.target_id == warrior.id)
@@ -2591,7 +2670,7 @@ func _s1b3_dispatch_cases() -> void:
 	_check("S1b3左键面板消费不移动", _s1a_same_state(before_panel, _s1a_state(sim)))
 	scene._dispatch_click({"kind": "portrait", "slot": 2}, Vector2(900, 500), false)
 	_check("S1b3左键头像只切人不入队", scene.controller.selected_slot == 2 and sim._skill_pending.is_empty())
-	scene._dispatch_click({}, sim.slot_unit(0).pos, false)
+	scene._dispatch_click({"kind": "world_target", "id": sim.slot_unit(0).id}, sim.slot_unit(0).pos, false)
 	_check("S1b3左键友军只选人", scene.controller.selected_slot == 0 and sim._skill_pending.is_empty())
 	for key in ["q", "w", "e"]:
 		scene._dispatch_click({"kind": "skill", "key": key}, Vector2(900, 500), false)
@@ -2604,7 +2683,7 @@ func _s1b3_dispatch_cases() -> void:
 	scene.free()
 
 
-## 移动/目标/施法共用接收顺序；切人锁输入角色，目标只在实际执行点写入。
+## 右键地面、右键目标与施法共用接收顺序，切人保留各指令原来的接收角色。
 func _s1b3_order_cases() -> void:
 	var scene := _s1b3_scene()
 	var sim: BattleSim = scene.sim
@@ -2613,8 +2692,8 @@ func _s1b3_order_cases() -> void:
 	var enemy := sim.living("enemy")[0]
 	first.target_id = -1
 	var original_target := first.target_id
-	scene._dispatch_click({}, Vector2(900, 500), false)
-	scene._dispatch_click({}, enemy.pos, true)
+	scene._dispatch_click({}, Vector2(900, 500), true)
+	scene._dispatch_click({"kind": "world_target", "id": enemy.id}, enemy.pos, true)
 	scene._unhandled_input(_s1b3_key("skill_r"))
 	scene._unhandled_input(_s1b3_key("slot_3"))
 	scene._dispatch_click({"kind": "skill", "key": "r"}, Vector2.ZERO, false)
@@ -2633,7 +2712,7 @@ func _s1b3_order_cases() -> void:
 	var priest := sim.slot_unit(1)
 	var mode := priest.order_kind
 	var progress := priest.next_attack_at
-	scene._dispatch_click({}, priest.pos, true)
+	scene._dispatch_click({"kind": "world_target", "id": priest.id}, priest.pos, true)
 	scene._process(BattleSim.SKILL_FIXED_STEP)
 	_check("S1b3牧师右键自己仅设友方目标", priest.target_id == priest.id and priest.order_kind == mode and priest.next_attack_at == progress)
 	var controller: BattleController = scene.controller
@@ -2647,7 +2726,7 @@ func _s1b3_order_cases() -> void:
 	scene.free()
 
 
-## 暂停和失焦丢弃待命令/余量，暂停仍可切人；倍速只增加相同模拟步数。
+## 暂停和失焦丢弃验证场待命令；右键地面与目标的拒绝都经过队列。
 func _s1b3_pause_cases() -> void:
 	var scene := _s1b3_scene()
 	var sim: BattleSim = scene.sim
@@ -2656,8 +2735,9 @@ func _s1b3_pause_cases() -> void:
 	scene._unhandled_input(_s1b3_key("pause"))
 	scene._unhandled_input(_s1b3_key("slot_3"))
 	scene._dispatch_click({"kind": "skill", "key": "r"}, Vector2.ZERO, false)
-	scene._dispatch_click({}, Vector2(900, 500), false)
-	scene._dispatch_click({}, sim.living("enemy")[0].pos, true)
+	scene._dispatch_click({}, Vector2(900, 500), true)
+	var enemy := sim.living("enemy")[0]
+	scene._dispatch_click({"kind": "world_target", "id": enemy.id}, enemy.pos, true)
 	_check("S1b3暂停目标输入不缓存", scene.controller.last_input.get("reason") == "BATTLE_PAUSED" and sim._skill_pending.is_empty())
 	scene._process(10.0)
 	_check("S1b3暂停冻结清余量且可切人", sim.paused and sim.time == 0.0 and sim._skill_accumulator == 0.0 and sim._skill_pending.is_empty() and scene.controller.selected_slot == 2 and scene.controller._skill_request_seq == 2)
@@ -3050,6 +3130,7 @@ func _s1b5_view_cases() -> void:
 
 
 ## 覆盖真实矩形、输入诊断、完整结果及生命周期；回调只捕获 WeakRef，销毁后无失效 Node 捕获。
+## 用视图本体坐标验证右键地面和目标依次进入真实输入队列。
 func _s1b5_view_case(kind: String) -> void:
 	# 仅测试视口尺寸覆盖既有1920×1080矩形，结束恢复，不改项目配置或布局资源。
 	var old_viewport_size: Vector2i = root.size
@@ -3136,9 +3217,11 @@ func _s1b5_view_case(kind: String) -> void:
 		_check("S1b5头像切人空槽即时刷新", controller.selected_slot == 1 and view._selected_slot == 1 and view._snap["skills"][sim.slot_unit(1).id][3]["empty"] and controller.last_input.get("reason") == "EMPTY_SLOT" and view._toast.contains("EMPTY_SLOT"))
 		_s1b5_mouse(view, view._portrait_rect(0).get_center())
 		_s1b5_mouse(view, Vector2(500, 500))
-		_check("S1b5矩形外移动同一队列", sim._skill_pending.size() == 1 and sim._skill_pending[0]["kind"] == "move")
+		_check("S1b5左键空地不入队", sim._skill_pending.is_empty())
+		_s1b5_mouse(view, Vector2(500, 500), true)
+		_check("S1b5右键地面移动同一队列", sim._skill_pending.size() == 1 and sim._skill_pending[0]["kind"] == "move")
 		var enemy: BattleSim.Unit = sim.living("enemy")[0]
-		var enemy_in_view: Vector2 = view.to_local(scene.to_global(enemy.pos))
+		var enemy_in_view: Vector2 = view._body_center(view._by_id[enemy.id])
 		_s1b5_mouse(view, enemy_in_view, true)
 		_check("S1b5真实右键目标同一队列", sim._skill_pending.size() == 2 and sim._skill_pending[1]["kind"] == "target")
 		_s1b5_mouse(view, r.get_center())

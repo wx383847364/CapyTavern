@@ -2,11 +2,13 @@ extends RefCounted
 ## 将选人、选目标、瞄准和鼠标指令转换为模拟器命令。
 ## 角色与技能目标属于当前战斗，不写回队长或存档。
 
+const MovementInput := preload("res://scripts/input/movement_input.gd")
 const BattleSim := preload("res://scripts/battle/battle_sim.gd")
 const BattleEvents := preload("res://scripts/battle/battle_events.gd")
 
 var sim: BattleSim
 var events: BattleEvents
+var movement := MovementInput.new()
 ## 当前选中的槽位 0～3；没有可选成员时为 -1。
 var selected_slot: int = -1
 ## 隔离绑定保持原场身份；失效后不能回退旧施法或自动认领下一场。
@@ -47,6 +49,7 @@ func setup(battle_sim: BattleSim, bus: BattleEvents, preferred_slot: int = -1, s
 		_skill_bound_id = battle_sim.skill_battle_id
 	elif _skill_input_mode:
 		return false
+	movement.interrupt()
 	sim = battle_sim
 	events = bus
 	if use_queue:
@@ -81,7 +84,7 @@ func selected_unit() -> BattleSim.Unit:
 	return sim.slot_unit(selected_slot) if sim != null and selected_slot >= 0 else null
 
 
-## 切换槽位后同步交出当前角色的 AI 控制，再通知界面清理上一角色的反馈。
+## 切换槽位时结束旧角色的持续走位，再交接控制权和界面反馈。
 func select_slot(slot_index: int) -> bool:
 	if _skill_input_mode and not _skill_binding_current():
 		return false
@@ -90,6 +93,7 @@ func select_slot(slot_index: int) -> bool:
 	if sim.slot_unit(slot_index) == null:
 		return false
 	if slot_index != selected_slot:
+		interrupt_direction()
 		selected_slot = slot_index
 		_reset_tab()
 		if sim.controlled_actor_id >= 0:
@@ -191,10 +195,10 @@ func cycle_target() -> void:
 		_tab_next = 1
 
 
-## 右键场上单位交持续指令；右键地面仍由模型裁剪到可走区域。
+## 实战右键按可见命中分流，点合法单位下达普攻或普疗，点地面提交走位。
 func player_right_click(pos: Vector2, target_id: int = -1) -> void:
 	var actor := selected_unit()
-	if actor == null or not actor.alive or sim.finished:
+	if actor == null or not actor.alive or sim.finished or (_skill_input_mode and not _skill_binding_current()):
 		return
 	var target: BattleSim.Unit = sim.units.get(target_id)
 	if target != null and target.side != ("ally" if actor.attack_kind == "heal" else "enemy"):
@@ -207,14 +211,50 @@ func player_right_click(pos: Vector2, target_id: int = -1) -> void:
 		else:
 			payload["pos"] = pos
 		last_input = sim._enqueue_skill_command(kind, payload)
-		# 记录即时观察目标，后续命令显式冻结此选择，排队执行不覆盖较晚的左键。
-		if target != null and last_input["queued"]:
-			select_target(target.id)
+		if last_input["queued"]:
+			interrupt_direction()
+			# 观察目标即时反馈，排队执行不覆盖较晚的左键选择。
+			if target != null:
+				select_target(target.id)
 	elif target != null:
 		if sim.issue_player_target(actor, target):
+			interrupt_direction()
 			select_target(target.id)
+	elif sim.order_move(actor.id, pos):
+		interrupt_direction()
+
+
+## 每步只提交变化后的方向，正式场按与鼠标和技能相同的顺序执行。
+func update_direction(enabled: bool) -> bool:
+	var actor := selected_unit()
+	if not enabled or actor == null or not actor.alive or not actor.controllable or actor.statuses.has("ice_block") or actor.statuses.has("frozen") or (_skill_input_mode and not _skill_binding_current()):
+		interrupt_direction()
+		return false
+	var previous := movement.direction
+	if not previous.is_zero_approx() and actor.order_kind != "direction" and not sim.direction_pending(actor.id):
+		# 已执行的技能或目标指令可能在模拟步里接管，等待原输入回中。
+		movement.interrupt()
+		return false
+	var direction := movement.poll()
+	if direction.is_equal_approx(previous):
+		return false
+	var accepted: bool
+	if _skill_input_mode:
+		var result := sim._enqueue_skill_command("direction", {"battle_id": _skill_bound_id, "caster_id": actor.id, "direction": direction})
+		accepted = result["queued"]
 	else:
-		sim.order_move(actor.id, pos)
+		accepted = sim.order_direction(actor.id, direction)
+	if not accepted:
+		movement.interrupt()
+	return accepted and not direction.is_zero_approx()
+
+
+## 暂停、切人或打开瞄准入口时结束持续命令，旧的摇杆方向不会转交给新角色。
+func interrupt_direction() -> void:
+	var actor := selected_unit()
+	if actor != null and (actor.order_kind == "direction" or not movement.direction.is_zero_approx()):
+		sim.clear_direction(actor.id)
+	movement.interrupt()
 
 
 ## 投影合法目标及实际地面落点，单位超距时仍允许提交接近命令。
@@ -274,54 +314,44 @@ func submit_player_skill(key: String, pointer: Vector2, on_ground: bool) -> bool
 	return press_skill(key, view["aim"])
 
 
-## 左键。点己方只选人；点地才移动。没有选中英雄时战场指令无效。
-func on_left_click(world_pos: Vector2) -> void:
-	if _skill_input_mode and not _skill_binding_current():
+## 旧版左键点可见队友选人，普通地面维持当前命令。
+func on_left_click(world_pos: Vector2, seen_target_id: Variant = null) -> void:
+	if (_skill_input_mode and not _skill_binding_current()) or sim.finished:
 		return
-	if sim.finished:
-		return
-	var ally := sim.unit_at(world_pos, "ally")
-	if ally != null:
+	var ally: BattleSim.Unit = sim.unit_at(world_pos, "ally") if seen_target_id == null else sim.units.get(seen_target_id)
+	if ally != null and ally.side == "ally" and ally.alive:
 		select_slot(ally.slot)
-		return
-	var unit := selected_unit()
-	if unit == null:
-		return
-	if _skill_input_mode:
-		last_input = sim._enqueue_skill_command("move", {"battle_id": _skill_bound_id, "caster_id": unit.id, "pos": world_pos}).duplicate(true)
-		return
-	sim.order_move(unit.id, world_pos)
 
 
-## 右键进入同一队列时，正式按原职业派发攻击/治疗，隔离只设目标；旧模式即时执行。
-func on_right_click(world_pos: Vector2) -> void:
+## 兼容旧版和验证场的右键入口，保留各自的目标处理方式。
+func on_right_click(world_pos: Vector2, seen_target_id: Variant = null) -> void:
+	if (_skill_input_mode and not _skill_binding_current()) or sim.finished:
+		return
+	var actor := selected_unit()
+	if actor == null or not actor.alive:
+		return
+	var target: BattleSim.Unit = sim.units.get(seen_target_id) if seen_target_id != null else sim.unit_at(world_pos, "enemy")
+	if target == null and seen_target_id == null and (not _skill_input_mode or actor.attack_kind == "heal"):
+		target = sim.unit_at(world_pos, "ally")
 	if _skill_input_mode:
-		if not _skill_binding_current():
-			return
-		var caster := selected_unit()
-		if caster == null:
-			return
-		var target := sim.unit_at(world_pos, "enemy")
-		if target == null and caster.kind == "priest":
-			target = sim.unit_at(world_pos, "ally")
 		if target != null:
-			# 正式牧师右键仍只接受友方。执行点再检查目标是否存活，不把命令提前写回。
-			if sim.formal_skill_sortie and caster.attack_kind == "heal" and target.side != "ally":
+			if sim.formal_skill_sortie and target.side != ("ally" if actor.attack_kind == "heal" else "enemy"):
 				return
-			last_input = sim._enqueue_skill_command("target", {"battle_id": _skill_bound_id, "caster_id": caster.id, "target_id": target.id}).duplicate(true)
+			last_input = sim._enqueue_skill_command("target", {"battle_id": _skill_bound_id, "caster_id": actor.id, "target_id": target.id}).duplicate(true)
+		else:
+			last_input = sim._enqueue_skill_command("move", {"battle_id": _skill_bound_id, "caster_id": actor.id, "pos": world_pos}).duplicate(true)
+		if last_input["queued"]:
+			interrupt_direction()
 		return
-	if sim.finished:
-		return
-	var unit := selected_unit()
-	if unit == null:
-		return
-	var enemy := sim.unit_at(world_pos, "enemy")
-	if enemy != null:
-		sim.order_attack(unit.id, enemy.id)
-		return
-	var ally := sim.unit_at(world_pos, "ally")
-	if ally != null:
-		sim.order_heal(unit.id, ally.id)
+	var accepted: bool
+	if target == null:
+		accepted = sim.order_move(actor.id, world_pos)
+	elif target.side == "enemy":
+		accepted = sim.order_attack(actor.id, target.id)
+	else:
+		accepted = sim.order_heal(actor.id, target.id)
+	if accepted:
+		interrupt_direction()
 
 
 ## 正式输入返回入队状态。混编真人允许接近，具体施法由模拟器结算。
